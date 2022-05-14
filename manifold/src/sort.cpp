@@ -315,6 +315,7 @@ void Manifold::Impl::GatherFaces(const Impl& old,
                  old.meshRelation_.triBary.beginD(),
                  meshRelation_.triBary.beginD());
   meshRelation_.barycentric = old.meshRelation_.barycentric;
+  meshRelation_.allMeshID = old.meshRelation_.allMeshID;
   DuplicateMeshIDs();
 
   if (old.faceNormal_.size() == old.NumTri()) {

@@ -403,6 +403,11 @@ Manifold Manifold::Compose(const std::vector<Manifold>& manifolds) {
   for (const Manifold& manifold : manifolds) {
     const Impl& impl = *(manifold.pImpl_);
     impl.ApplyTransform();
+    for (int id : impl.meshRelation_.allMeshID) {
+      auto result = thrust::find(combined.meshRelation_.allMeshID.begin(), combined.meshRelation_.allMeshID.end(), id);
+      if (result == combined.meshRelation_.allMeshID.end())
+        combined.meshRelation_.allMeshID.H().push_back(id);
+    }
 
     thrust::copy(thrust::device, impl.vertPos_.beginD(), impl.vertPos_.endD(),
                  combined.vertPos_.beginD() + nextVert);

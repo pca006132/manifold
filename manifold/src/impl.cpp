@@ -284,6 +284,7 @@ struct EdgeBox {
 namespace manifold {
 
 std::vector<int> Manifold::Impl::meshID2Original_;
+std::mutex Manifold::Impl::meshID2OriginalMutex;
 
 /**
  * Create a manifold from an input triangle Mesh. Will throw if the Mesh is not
@@ -363,14 +364,23 @@ Manifold::Impl::Impl(Shape shape) {
  * ID can be found using the meshID2Original mapping.
  */
 void Manifold::Impl::DuplicateMeshIDs() {
-  std::map<int, int> old2new;
-  for (BaryRef& ref : meshRelation_.triBary) {
-    if (old2new.find(ref.meshID) == old2new.end()) {
-      old2new[ref.meshID] = meshID2Original_.size();
-      meshID2Original_.push_back(meshID2Original_[ref.meshID]);
+  VecDH<int> newMeshID;
+  {
+    std::scoped_lock<std::mutex> lock(meshID2OriginalMutex);
+    for (int id : meshRelation_.allMeshID) {
+        newMeshID.H().push_back(meshID2Original_.size());
+        meshID2Original_.push_back(meshID2Original_[id]);
     }
-    ref.meshID = old2new[ref.meshID];
   }
+  const VecDH<int>::IterDc oldMeshIDStart = meshRelation_.allMeshID.cbeginD();
+  const VecDH<int>::IterDc oldMeshIDEnd = meshRelation_.allMeshID.cendD();
+  const VecD<int> newMeshIDD(newMeshID);
+  thrust::for_each(meshRelation_.triBary.beginD(), meshRelation_.triBary.endD(),
+          [&](BaryRef& ref) {
+            int index = thrust::distance(oldMeshIDStart, thrust::find(oldMeshIDStart, oldMeshIDEnd, ref.meshID));
+            ref.meshID = newMeshIDD[index];
+          });
+  meshRelation_.allMeshID = newMeshID;
 }
 
 void Manifold::Impl::ReinitializeReference(int meshID) {
@@ -383,9 +393,15 @@ int Manifold::Impl::InitializeNewReference(
     const std::vector<float>& properties,
     const std::vector<float>& propertyTolerance) {
   meshRelation_.triBary.resize(NumTri());
-  const int nextMeshID = meshID2Original_.size();
-  meshID2Original_.push_back(nextMeshID);
+  int nextMeshID;
+  {
+    std::scoped_lock<std::mutex> lock(meshID2OriginalMutex);
+    nextMeshID = meshID2Original_.size();
+    meshID2Original_.push_back(nextMeshID);
+  }
+
   ReinitializeReference(nextMeshID);
+  meshRelation_.allMeshID = VecDH<int>(1, nextMeshID);
 
   const int numProps = propertyTolerance.size();
 

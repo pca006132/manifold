@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #pragma once
+#include <mutex>
 #include "collider.h"
 #include "manifold.h"
 #include "shared.h"
@@ -27,6 +28,7 @@ struct Manifold::Impl {
   struct MeshRelationD {
     VecDH<glm::vec3> barycentric;
     VecDH<BaryRef> triBary;
+    VecDH<int> allMeshID;
   };
 
   Box bBox_;
@@ -41,6 +43,7 @@ struct Manifold::Impl {
   glm::mat4x3 transform_ = glm::mat4x3(1.0f);
 
   static std::vector<int> meshID2Original_;
+  static std::mutex meshID2OriginalMutex;
 
   Impl() {}
   enum class Shape { TETRAHEDRON, CUBE, OCTAHEDRON };
