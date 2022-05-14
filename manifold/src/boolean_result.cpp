@@ -679,8 +679,9 @@ Manifold::Impl Boolean3::Result(Manifold::OpType op) const {
   for (int id : inQ_.meshRelation_.allMeshID) {
     auto result = thrust::find(outR.meshRelation_.allMeshID.begin(), outR.meshRelation_.allMeshID.end(), id);
     if (result == outR.meshRelation_.allMeshID.end())
-      outR.meshRelation_.allMeshID.H().push_back(id);
+      outR.meshRelation_.allMeshID.push_back(id);
   }
+  thrust::sort(thrust::device, outR.meshRelation_.allMeshID.begin(), outR.meshRelation_.allMeshID.end());
   outR.DuplicateMeshIDs();
 
   outR.SimplifyTopology();

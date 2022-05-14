@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <map>
+#include <atomic>
 
 #include "graph.h"
 #include "impl.h"
@@ -29,12 +30,10 @@ __host__ __device__ void AtomicAddVec3(glm::vec3& target,
   for (int i : {0, 1, 2}) {
 #ifdef __CUDA_ARCH__
     atomicAdd(&target[i], add[i]);
-#elif defined(_OPENMP)
-#pragma omp atomic
-    target[i] += add[i];
 #else
-    // should be executed with single thread on the host
-    target[i] += add[i];
+    std::atomic<float> &tar = reinterpret_cast<std::atomic<float>&>(target[i]);
+    float old_val = tar.load();
+    while (!tar.compare_exchange_weak(old_val, old_val + add[i]));
 #endif
   }
 }
@@ -368,7 +367,7 @@ void Manifold::Impl::DuplicateMeshIDs() {
   {
     std::scoped_lock<std::mutex> lock(meshID2OriginalMutex);
     for (int id : meshRelation_.allMeshID) {
-        newMeshID.H().push_back(meshID2Original_.size());
+        newMeshID.push_back(meshID2Original_.size());
         meshID2Original_.push_back(meshID2Original_[id]);
     }
   }
@@ -377,7 +376,7 @@ void Manifold::Impl::DuplicateMeshIDs() {
   const VecD<int> newMeshIDD(newMeshID);
   thrust::for_each(meshRelation_.triBary.beginD(), meshRelation_.triBary.endD(),
           [&](BaryRef& ref) {
-            int index = thrust::distance(oldMeshIDStart, thrust::find(oldMeshIDStart, oldMeshIDEnd, ref.meshID));
+            int index = thrust::distance(oldMeshIDStart, thrust::lower_bound(oldMeshIDStart, oldMeshIDEnd, ref.meshID));
             ref.meshID = newMeshIDD[index];
           });
   meshRelation_.allMeshID = newMeshID;

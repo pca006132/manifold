@@ -406,7 +406,7 @@ Manifold Manifold::Compose(const std::vector<Manifold>& manifolds) {
     for (int id : impl.meshRelation_.allMeshID) {
       auto result = thrust::find(combined.meshRelation_.allMeshID.begin(), combined.meshRelation_.allMeshID.end(), id);
       if (result == combined.meshRelation_.allMeshID.end())
-        combined.meshRelation_.allMeshID.H().push_back(id);
+        combined.meshRelation_.allMeshID.push_back(id);
     }
 
     thrust::copy(thrust::device, impl.vertPos_.beginD(), impl.vertPos_.endD(),
@@ -431,6 +431,7 @@ Manifold Manifold::Compose(const std::vector<Manifold>& manifolds) {
     nextTri += manifold.NumTri();
     nextBary += impl.meshRelation_.barycentric.size();
   }
+  thrust::sort(thrust::device, combined.meshRelation_.allMeshID.begin(), combined.meshRelation_.allMeshID.end());
 
   combined.DuplicateMeshIDs();
   combined.Finish();
