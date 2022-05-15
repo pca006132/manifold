@@ -14,6 +14,7 @@
 
 #include <thrust/execution_policy.h>
 #include <thrust/logical.h>
+#include <thrust/count.h>
 
 #include <algorithm>
 #include <map>
@@ -363,23 +364,31 @@ Manifold::Impl::Impl(Shape shape) {
  * ID can be found using the meshID2Original mapping.
  */
 void Manifold::Impl::DuplicateMeshIDs() {
-  VecDH<int> newMeshID;
+  int start;
   {
     std::scoped_lock<std::mutex> lock(meshID2OriginalMutex);
+    start = meshID2Original_.size();
+    meshID2Original_.reserve(meshID2Original_.size() + meshRelation_.allMeshID.size());
     for (int id : meshRelation_.allMeshID) {
-        newMeshID.push_back(meshID2Original_.size());
         meshID2Original_.push_back(meshID2Original_[id]);
     }
   }
   const VecDH<int>::IterDc oldMeshIDStart = meshRelation_.allMeshID.cbeginD();
   const VecDH<int>::IterDc oldMeshIDEnd = meshRelation_.allMeshID.cendD();
-  const VecD<int> newMeshIDD(newMeshID);
+  VecDH<char> seen(meshRelation_.allMeshID.size(), 0);
+  char* seenD = seen.ptrD();
   thrust::for_each(thrust::device, meshRelation_.triBary.beginD(), meshRelation_.triBary.endD(),
-          [&]__host__ __device__(BaryRef& ref) {
+          [=]__host__ __device__(BaryRef& ref) {
             int index = thrust::distance(oldMeshIDStart, thrust::lower_bound(thrust::device, oldMeshIDStart, oldMeshIDEnd, ref.meshID));
-            ref.meshID = newMeshIDD[index];
+            ref.meshID = start + index;
+            seenD[index] = 1;
           });
-  meshRelation_.allMeshID = newMeshID;
+  int count = thrust::count(thrust::device, seen.beginD(), seen.endD(), 1);
+  meshRelation_.allMeshID.resize(count);
+  thrust::copy_if(thrust::device, countAt(start), countAt(start + seen.size()), seen.beginD(),
+          meshRelation_.allMeshID.beginD(), []__host__ __device__(const char b) {
+            return b == 1;
+          });
 }
 
 void Manifold::Impl::ReinitializeReference(int meshID) {
