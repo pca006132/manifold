@@ -374,9 +374,9 @@ void Manifold::Impl::DuplicateMeshIDs() {
   const VecDH<int>::IterDc oldMeshIDStart = meshRelation_.allMeshID.cbeginD();
   const VecDH<int>::IterDc oldMeshIDEnd = meshRelation_.allMeshID.cendD();
   const VecD<int> newMeshIDD(newMeshID);
-  thrust::for_each(meshRelation_.triBary.beginD(), meshRelation_.triBary.endD(),
-          [&](BaryRef& ref) {
-            int index = thrust::distance(oldMeshIDStart, thrust::lower_bound(oldMeshIDStart, oldMeshIDEnd, ref.meshID));
+  thrust::for_each(thrust::device, meshRelation_.triBary.beginD(), meshRelation_.triBary.endD(),
+          [&]__host__ __device__(BaryRef& ref) {
+            int index = thrust::distance(oldMeshIDStart, thrust::lower_bound(thrust::device, oldMeshIDStart, oldMeshIDEnd, ref.meshID));
             ref.meshID = newMeshIDD[index];
           });
   meshRelation_.allMeshID = newMeshID;
@@ -535,10 +535,10 @@ void Manifold::Impl::CreateAndFixHalfedges(const VecDH<glm::ivec3>& triVerts) {
   // and fix it by swapping one of the identical edges, so it is important that
   // we have the edges paired according to their face.
   thrust::stable_sort(thrust::device, edge.beginD(), edge.endD());
-  thrust::for_each_n(thrust::host, countAt(0), halfedge_.size() / 2,
-                     LinkHalfedges({halfedge_.ptrH(), edge.cptrH()}));
-  thrust::for_each(thrust::host, countAt(1), countAt(halfedge_.size() / 2),
-                   SwapHalfedges({halfedge_.ptrH(), edge.cptrH()}));
+  thrust::for_each_n(thrust::device, countAt(0), halfedge_.size() / 2,
+                     LinkHalfedges({halfedge_.ptrD(), edge.cptrD()}));
+  thrust::for_each(thrust::device, countAt(1), countAt(halfedge_.size() / 2),
+                   SwapHalfedges({halfedge_.ptrD(), edge.cptrD()}));
 }
 
 /**
