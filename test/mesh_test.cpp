@@ -928,4 +928,3 @@ TEST(Manifold, MemoryAccessError) {
     m.NumEdge();
   }
 }
-
