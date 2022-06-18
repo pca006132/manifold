@@ -883,3 +883,49 @@ TEST(Boolean, Cubes) {
 
   if (options.exportModels) ExportMesh("cubes.glb", result.GetMesh(), {});
 }
+
+std::vector<Manifold> RoundedFrameComponents(float edgeLength, float radius,
+                                             int circularSegments) {
+  Manifold edge = Manifold::Cylinder(edgeLength, radius, -1, circularSegments);
+  Manifold corner = Manifold::Sphere(radius, circularSegments);
+
+  std::vector<Manifold> edge1({corner, edge});
+  for (Manifold& m : edge1) {
+    m.Rotate(-90).Translate({-edgeLength / 2, -edgeLength / 2, 0});
+  }
+
+  std::vector<Manifold> edge2;
+  for (Manifold m : edge1) {
+    edge2.push_back(Manifold(m).Rotate(0, 0, 180));
+    edge2.push_back(
+        Manifold(m).Translate({-edgeLength / 2, -edgeLength / 2, 0}));
+  }
+
+  std::vector<Manifold> edge4;
+  for (Manifold m : edge2) {
+    edge4.push_back(Manifold(m).Rotate(0, 0, 90));
+    edge4.push_back(Manifold(m));
+  }
+
+  std::vector<Manifold> frame;
+  for (Manifold m : edge4) {
+    frame.push_back(Manifold(m).Translate({0, 0, -edgeLength / 2}));
+    frame.push_back(Manifold(m).Rotate(180));
+  }
+
+  return frame;
+}
+
+TEST(Manifold, MemoryAccessError) {
+  auto components = RoundedFrameComponents(100, 10, 4);
+
+  std::vector<unsigned int> indices({5, 8, 10, 2, 1});
+
+  Manifold m;
+  for (unsigned int i = 0; i < indices.size(); i++) {
+    m = m + components[indices[i]];
+    // force evaluate
+    m.NumEdge();
+  }
+}
+

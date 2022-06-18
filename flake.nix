@@ -31,6 +31,7 @@
               cmakeFlags = [
                 "-DMANIFOLD_PAR=${pkgs.lib.strings.toUpper parallel-backend}"
                 "-DMANIFOLD_USE_CUDA=${if cuda-support then "ON" else "OFF"}"
+                "-DCMAKE_CXX_FLAGS=-fsanitize=address"
               ];
               checkPhase = ''
                 cd test
