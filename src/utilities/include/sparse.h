@@ -18,6 +18,7 @@
 #include "optional_assert.h"
 #include "par.h"
 #include "public.h"
+#include "radix_sort.h"
 #include "utils.h"
 #include "vec_dh.h"
 
@@ -62,7 +63,7 @@ class SparseIndices {
     return out;
   }
 
-  void Sort(ExecutionPolicy policy) { sort(policy, data.begin(), data.end()); }
+  void Sort(ExecutionPolicy policy) { radix_sort(data.ptrD(), data.size()); }
 
   void Resize(int size) { data.resize(size, -1); }
 
