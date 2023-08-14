@@ -19,7 +19,7 @@
 #include <algorithm>
 
 namespace {
-constexpr size_t kSeqThreshold = 1 << 18;
+constexpr size_t kSeqThreshold = 1 << 16;
 
 template <typename N, const int K>
 struct Hist {
@@ -65,8 +65,31 @@ void histogram(T* ptr, typename H::SizeType n, H& hist) {
 
 template <typename T, typename H>
 void shuffle(T* src, T* target, typename H::SizeType n, H& hist, int k) {
-  for (typename H::SizeType i = 0; i < n; ++i)
-    target[hist.hist[k][(src[i] >> (8 * k)) & 0xFF]++] = src[i];
+  int prev = -1;
+  int consecutive = 0;
+  typename H::SizeType i = 0;
+#pragma GCC unroll 8
+  while (i < n) {
+    int byte = (src[i] >> (8 * k)) & 0xFF;
+    target[hist.hist[k][byte]++] = src[i];
+    i++;
+    // only trigger if we got a long sequence
+    if (__builtin_expect(byte == prev && ++consecutive == 64, 0)) {
+      typename H::SizeType j = i;
+      while (j < n && ((src[j] >> (8 * k)) & 0xFF) == byte) ++j;
+      if (j - i > kSeqThreshold)
+        std::copy(std::execution::par, src + i, src + j,
+                  target + hist.hist[k][byte]);
+      else
+        std::copy(src + i, src + j, target + hist.hist[k][byte]);
+      hist.hist[k][byte] += j - i;
+      i = j;
+      consecutive = 0;
+    } else if (byte != prev) {
+      consecutive = 0;
+      prev = byte;
+    }
+  }
 }
 
 template <typename T, typename SizeType>
@@ -110,7 +133,8 @@ struct SortedRange {
   bool swapBuffer() const {
     T *src = input, *target = tmp;
     if (inTmp) std::swap(src, target);
-    std::copy(src + offset, src + offset + length, target + offset);
+    std::copy(std::execution::par_unseq, src + offset, src + offset + length,
+              target + offset);
     return !inTmp;
   }
   void join(const SortedRange<T, SizeType>& rhs) {

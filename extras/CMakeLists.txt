@@ -19,6 +19,11 @@ target_link_libraries(perfTest manifold)
 target_compile_options(perfTest PRIVATE ${MANIFOLD_FLAGS})
 target_compile_features(perfTest PUBLIC cxx_std_17)
 
+add_executable(sortTest sort_test.cpp)
+target_link_libraries(sortTest utilities)
+target_compile_options(sortTest PRIVATE ${MANIFOLD_FLAGS})
+target_compile_features(sortTest PUBLIC cxx_std_17)
+
 add_executable(largeSceneTest large_scene_test.cpp)
 target_link_libraries(largeSceneTest manifold)
 target_compile_options(largeSceneTest PRIVATE ${MANIFOLD_FLAGS})
