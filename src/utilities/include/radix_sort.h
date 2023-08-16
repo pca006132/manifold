@@ -163,11 +163,13 @@ namespace manifold {
 // btw, this is a stable sort
 template <typename T, typename SizeTy>
 void radix_sort(T* input, SizeTy n) {
+  static tbb::simple_partitioner sp;
   T* aux = new T[n];
-  SizeTy blockSize = std::max(n / tbb::this_task_arena::max_concurrency() / 4,
+  SizeTy blockSize = std::max(n / tbb::this_task_arena::max_concurrency() / 2,
                               static_cast<SizeTy>(kSeqThreshold / sizeof(T)));
   SortedRange<T, SizeTy> result = SortedRange<T, SizeTy>(input, aux);
-  tbb::parallel_reduce(tbb::blocked_range<SizeTy>(0, n, blockSize), result);
+  tbb::parallel_deterministic_reduce(
+      tbb::blocked_range<SizeTy>(0, n, blockSize), result, sp);
   if (result.inTmp) std::copy(aux, aux + n, input);
   delete[] aux;
 }
