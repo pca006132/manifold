@@ -63,7 +63,7 @@ class SparseIndices {
     return out;
   }
 
-  void Sort(ExecutionPolicy policy) { radix_sort(data.ptrD(), data.size()); }
+  void Sort(ExecutionPolicy policy) { radix_sort(data.data(), data.size()); }
 
   void Resize(int size) { data.resize(size, -1); }
 
