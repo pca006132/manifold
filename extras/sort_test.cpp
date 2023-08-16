@@ -1,3 +1,5 @@
+#include "thrust/sort.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -7,7 +9,6 @@
 
 #include "radix_sort.h"
 #include "tbb/parallel_for.h"
-#include "thrust/sort.h"
 #include "thrust/system/cpp/execution_policy.h"
 #include "thrust/system/tbb/execution_policy.h"
 
@@ -52,12 +53,40 @@ void bench_sort() {
   auto pca_sort_mt = [](auto begin, auto end) {
     manifold::radix_sort(&*begin, (int)std::distance(begin, end));
   };
-  for (size_t size = 4; size <= 26; size += 2) {
+
+  std::cout << "random array test" << std::endl;
+  for (size_t size = 8; size <= 26; size += 2) {
     std::cout << std::endl;
     std::cout << "size: 1 << " << size << std::endl;
     int times[6] = {0};
     for (int i = 0; i < 5; i++) {
-      const auto data = genRandom<T>(1 << size);
+      auto data = genRandom<T>(1 << size);
+      times[0] += bench(data, std_sort);
+      times[1] += bench(data, std_sort_mt);
+      times[2] += bench(data, thrust_sort);
+      times[3] += bench(data, thrust_sort_mt);
+      times[4] += bench(data, thrust_stable_sort_mt);
+      times[5] += bench(data, pca_sort_mt);
+    }
+    std::cout << "std::sort(seq)     : " << times[0] / 5 << " us" << std::endl;
+    std::cout << "std::sort(par)     : " << times[1] / 5 << " us" << std::endl;
+    std::cout << "thrust(seq)        : " << times[2] / 5 << " us" << std::endl;
+    std::cout << "thrust(par)        : " << times[3] / 5 << " us" << std::endl;
+    std::cout << "thrust(stable, par): " << times[4] / 5 << " us" << std::endl;
+    std::cout << "pca (par)          : " << times[5] / 5 << " us" << std::endl;
+  }
+
+  std::cout << std::endl << "sorted array with random tail test" << std::endl;
+  for (size_t size = 8; size <= 26; size += 2) {
+    std::cout << std::endl;
+    std::cout << "size: 1 << " << size << std::endl;
+    int times[6] = {0};
+    for (int i = 0; i < 5; i++) {
+      auto data = genRandom<T>((1 << size) - (1 << 5));
+      thrust_sort_mt(data.begin(), data.end());
+      auto data2 = genRandom<T>(1 << 5);
+      data.insert(data.begin(), data2.begin(), data2.end());
+
       times[0] += bench(data, std_sort);
       times[1] += bench(data, std_sort_mt);
       times[2] += bench(data, thrust_sort);

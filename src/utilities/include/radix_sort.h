@@ -17,6 +17,7 @@
 #include <tbb/tbb.h>
 
 #include <algorithm>
+#include <limits>
 
 namespace {
 constexpr size_t kSeqThreshold = 1 << 16;
@@ -26,13 +27,17 @@ struct Hist {
   using SizeType = N;
   static constexpr int k = K;
   N hist[k][256] = {{0}};
+  bool sorted = true;
   void merge(const Hist<N, K>& other) {
     for (int i = 0; i < k; ++i)
+#pragma GCC unroll 8
       for (int j = 0; j < 256; ++j) hist[i][j] += other.hist[i][j];
+    sorted &= other.sorted;
   }
   void prefixSum(int total, bool* canSkip) {
     for (int i = 0; i < k; ++i) {
       size_t count = 0;
+#pragma GCC unroll 8
       for (int j = 0; j < 256; ++j) {
         size_t tmp = hist[i][j];
         hist[i][j] = count;
@@ -46,9 +51,16 @@ struct Hist {
 template <typename T, typename H>
 void histogram(T* ptr, typename H::SizeType n, H& hist) {
   auto worker = [](T* ptr, typename H::SizeType n, H& hist) {
-    for (typename H::SizeType i = 0; i < n; ++i)
+    T last = std::numeric_limits<T>::min();
+    bool sorted = true;
+#pragma GCC unroll 8
+    for (typename H::SizeType i = 0; i < n; ++i) {
+      if (ptr[i] < last) sorted = false;
+      last = ptr[i];
       for (int k = 0; k < hist.k; ++k)
         ++hist.hist[k][(ptr[i] >> (8 * k)) & 0xFF];
+    }
+    hist.sorted &= sorted;
   };
   if (n < kSeqThreshold) {
     worker(ptr, n, hist);
@@ -57,7 +69,10 @@ void histogram(T* ptr, typename H::SizeType n, H& hist) {
     tbb::parallel_for(
         tbb::blocked_range<typename H::SizeType>(0, n, kSeqThreshold),
         [&worker, &store, ptr](const auto& r) {
-          worker(ptr + r.begin(), r.end() - r.begin(), store.local());
+          H& hist = store.local();
+          worker(ptr + r.begin(), r.end() - r.begin(), hist);
+          if (r.begin() > 0)
+            hist.sorted &= ptr[r.begin() - 1] <= ptr[r.begin()];
         });
     store.combine_each([&hist](const H& h) { hist.merge(h); });
   }
@@ -95,8 +110,8 @@ void shuffle(T* src, T* target, typename H::SizeType n, H& hist, int k) {
 template <typename T, typename SizeType>
 bool LSB_radix_sort(T* input, T* tmp, SizeType n) {
   Hist<SizeType, sizeof(T) / sizeof(char)> hist;
-  if (std::is_sorted(input, input + n)) return false;
   histogram(input, n, hist);
+  if (hist.sorted) return false;
   bool canSkip[hist.k] = {0};
   hist.prefixSum(n, canSkip);
   T *a = input, *b = tmp;
@@ -165,7 +180,7 @@ template <typename T, typename SizeTy>
 void radix_sort(T* input, SizeTy n) {
   static tbb::simple_partitioner sp;
   T* aux = new T[n];
-  SizeTy blockSize = std::max(n / tbb::this_task_arena::max_concurrency() / 2,
+  SizeTy blockSize = std::max(n / tbb::this_task_arena::max_concurrency(),
                               static_cast<SizeTy>(kSeqThreshold / sizeof(T)));
   SortedRange<T, SizeTy> result = SortedRange<T, SizeTy>(input, aux);
   tbb::parallel_deterministic_reduce(
