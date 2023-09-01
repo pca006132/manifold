@@ -243,6 +243,24 @@ struct ParCollisionRecorder {
   void end(int queryIdx) const {}
 };
 
+template <const bool inverted>
+struct VertexFaceRecorder {
+  SparseVertexFaceMap::Store queryTri;
+  VecView<char> empty;
+  void record(int queryIdx, int leafIdx) {
+    uint64_t key;
+    if (inverted)
+      key = (static_cast<uint64_t>(leafIdx) << 32) |
+            static_cast<uint64_t>(queryIdx);
+    else
+      key = (static_cast<uint64_t>(queryIdx) << 32) |
+            static_cast<uint64_t>(leafIdx);
+    queryTri.Insert(key, std::make_pair(0, 0.0f));
+  }
+  bool earlyexit(int queryIdx) const { return empty[queryIdx] == 1; }
+  void end(int queryIdx) const {}
+};
+
 struct BuildInternalBoxes {
   VecView<Box> nodeBBox_;
   VecView<int> counter_;
@@ -331,6 +349,28 @@ SparseIndices Collider::Collisions(const VecView<const T>& queriesIn) const {
   }
 }
 
+template <const bool inverted>
+SparseVertexFaceMap Collider::VertexFaceCollisions(
+    const VecView<const glm::vec3>& queriesIn) const {
+  // compute the number of collisions to determine the size for allocation and
+  // offset, this avoids the need for atomic
+  auto policy = autoPolicy(queriesIn.size());
+  Vec<int> counts(queriesIn.size() + 1, 0);
+  Vec<char> empty(queriesIn.size(), 0);
+  for_each_n(policy, zip(queriesIn.cbegin(), countAt(0)), queriesIn.size(),
+             FindCollisions<glm::vec3, false, CountCollisions>{
+                 nodeBBox_, internalChildren_, {counts, empty}});
+  // compute start index for each query and total count
+  exclusive_scan(ExecutionPolicy::Par, counts.begin(), counts.end(),
+                 counts.begin(), 0, std::plus<int>());
+  if (counts.back() == 0) return SparseVertexFaceMap(0);
+  SparseVertexFaceMap map(counts.back());
+  for_each_n(policy, zip(queriesIn.cbegin(), countAt(0)), queriesIn.size(),
+             FindCollisions<glm::vec3, false, VertexFaceRecorder<inverted>>{
+                 nodeBBox_, internalChildren_, {map.D(), empty}});
+  return map;
+}
+
 /**
  * Recalculate the collider's internal bounding boxes without changing the
  * hierarchy.
@@ -387,5 +427,11 @@ template SparseIndices Collider::Collisions<false, true, Box>(
 
 template SparseIndices Collider::Collisions<false, true, glm::vec3>(
     const VecView<const glm::vec3>&) const;
+
+template SparseVertexFaceMap Collider::VertexFaceCollisions<true>(
+    const VecView<const glm::vec3>& queriesIn) const;
+
+template SparseVertexFaceMap Collider::VertexFaceCollisions<false>(
+    const VecView<const glm::vec3>& queriesIn) const;
 
 }  // namespace manifold

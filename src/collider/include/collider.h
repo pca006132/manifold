@@ -27,9 +27,13 @@ class Collider {
            const VecView<const uint32_t>& leafMorton);
   bool Transform(glm::mat4x3);
   void UpdateBoxes(const VecView<const Box>& leafBB);
+
   template <const bool selfCollision = false, const bool inverted = false,
             typename T>
   SparseIndices Collisions(const VecView<const T>& queriesIn) const;
+
+  template <const bool inverted = false>
+  SparseVertexFaceMap VertexFaceCollisions(const VecView<const glm::vec3>& queriesIn) const;
 
  private:
   Vec<Box> nodeBBox_;

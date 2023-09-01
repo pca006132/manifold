@@ -78,8 +78,8 @@ struct Manifold::Impl {
   void Warp(std::function<void(glm::vec3&)> warpFunc);
   Impl Transform(const glm::mat4x3& transform) const;
   SparseIndices EdgeCollisions(const Impl& B, bool inverted = false) const;
-  SparseIndices VertexCollisionsZ(VecView<const glm::vec3> vertsIn,
-                                  bool inverted = false) const;
+  SparseVertexFaceMap VertexCollisionsZ(VecView<const glm::vec3> vertsIn,
+                                        bool inverted = false) const;
 
   bool IsEmpty() const { return NumVert() == 0; }
   int NumVert() const { return vertPos_.size(); }

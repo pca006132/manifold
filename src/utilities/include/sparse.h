@@ -15,6 +15,7 @@
 #pragma once
 #include <math.h>
 
+#include "hashtable.h"
 #include "optional_assert.h"
 #include "par.h"
 #include "public.h"
@@ -43,8 +44,8 @@ class SparseIndices {
 #else
 #error "unknown architecture"
 #endif
-  static constexpr int64_t EncodePQ(int p, int q) {
-    return (int64_t(p) << 32) | q;
+  static constexpr uint64_t EncodePQ(int p, int q) {
+    return (uint64_t(p) << 32) | q;
   }
 
   SparseIndices() = default;
@@ -200,4 +201,7 @@ class SparseIndices {
   }
 };
 
+inline Uint64 identity(Uint64 x) { return x; }
+using SparseVertexFaceMap = HashTable<std::pair<int, float>>;
+using SparseEdgeEdgeMap = HashTable<std::pair<int, glm::vec4>>;
 }  // namespace manifold

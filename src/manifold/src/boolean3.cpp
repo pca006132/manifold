@@ -14,6 +14,7 @@
 
 #include "boolean3.h"
 
+#include <iostream>
 #include <limits>
 
 #include "par.h"
@@ -67,17 +68,16 @@ glm::vec4 Intersect(const glm::vec3 &pL, const glm::vec3 &pR,
 
 template <const bool inverted>
 struct CopyFaceEdges {
-  const SparseIndices &p1q1;
-  // const int *p1q1;
   // x can be either vert or edge (0 or 1).
-  SparseIndices &pXq1;
+  const SparseIndices &pXq1;
+  SparseEdgeEdgeMap::Store p1q1;
   VecView<const Halfedge> halfedgesQ;
 
   void operator()(thrust::tuple<int, int> in) {
     int idx = 3 * thrust::get<0>(in);
     int i = thrust::get<1>(in);
-    int pX = p1q1.Get(i, inverted);
-    int q2 = p1q1.Get(i, !inverted);
+    int pX = pXq1.Get(i, inverted);
+    int q2 = pXq1.Get(i, !inverted);
 
     for (const int j : {0, 1, 2}) {
       const int q1 = 3 * q2 + j;
@@ -85,19 +85,22 @@ struct CopyFaceEdges {
       int a = pX;
       int b = edge.IsForward() ? q1 : edge.pairedHalfedge;
       if (inverted) std::swap(a, b);
-      pXq1.Set(idx + j, a, b);
+      uint64_t key =
+          (static_cast<uint64_t>(a) << 32) | static_cast<uint64_t>(b);
+      p1q1.Insert(key, std::make_pair(0, glm::vec4(0)));
     }
   }
 };
 
-SparseIndices Filter11(const Manifold::Impl &inP, const Manifold::Impl &inQ,
-                       const SparseIndices &p1q2, const SparseIndices &p2q1) {
-  SparseIndices p1q1(3 * p1q2.size() + 3 * p2q1.size());
+SparseEdgeEdgeMap Filter11(const Manifold::Impl &inP, const Manifold::Impl &inQ,
+                           const SparseIndices &p1q2,
+                           const SparseIndices &p2q1) {
+  SparseEdgeEdgeMap p1q1(3 * p1q2.size() + 3 * p2q1.size());
   for_each_n(autoPolicy(p1q2.size()), zip(countAt(0), countAt(0)), p1q2.size(),
-             CopyFaceEdges<false>({p1q2, p1q1, inQ.halfedge_}));
+             CopyFaceEdges<false>({p1q2, p1q1.D(), inQ.halfedge_}));
   for_each_n(autoPolicy(p2q1.size()), zip(countAt(p1q2.size()), countAt(0)),
-             p2q1.size(), CopyFaceEdges<true>({p2q1, p1q1, inP.halfedge_}));
-  p1q1.Unique();
+             p2q1.size(), CopyFaceEdges<true>({p2q1, p1q1.D(), inP.halfedge_}));
+  p1q1.Resize();
   return p1q1;
 }
 
@@ -147,45 +150,6 @@ inline thrust::pair<int, glm::vec2> Shadow01(
   return thrust::make_pair(s01, yz01);
 }
 
-// https://github.com/scandum/binary_search/blob/master/README.md
-// much faster than standard binary search on large arrays
-int monobound_quaternary_search(VecView<const int64_t> array, int64_t key) {
-  if (array.size() == 0) {
-    return -1;
-  }
-  unsigned int bot = 0;
-  unsigned int top = array.size();
-  while (top >= 65536) {
-    unsigned int mid = top / 4;
-    top -= mid * 3;
-    if (key < array[bot + mid * 2]) {
-      if (key >= array[bot + mid]) {
-        bot += mid;
-      }
-    } else {
-      bot += mid * 2;
-      if (key >= array[bot + mid]) {
-        bot += mid;
-      }
-    }
-  }
-
-  while (top > 3) {
-    unsigned int mid = top / 2;
-    if (key >= array[bot + mid]) {
-      bot += mid;
-    }
-    top -= mid;
-  }
-
-  while (top--) {
-    if (key == array[bot + top]) {
-      return bot + top;
-    }
-  }
-  return -1;
-}
-
 struct Kernel11 {
   VecView<const glm::vec3> vertPosP;
   VecView<const glm::vec3> vertPosQ;
@@ -193,13 +157,18 @@ struct Kernel11 {
   VecView<const Halfedge> halfedgeQ;
   float expandP;
   VecView<const glm::vec3> normalP;
-  const SparseIndices &p1q1;
+  SparseEdgeEdgeMap::Store p1q1;
 
-  void operator()(thrust::tuple<int, glm::vec4 &, int &> inout) {
-    const int p1 = p1q1.Get(thrust::get<0>(inout), false);
-    const int q1 = p1q1.Get(thrust::get<0>(inout), true);
-    glm::vec4 &xyzz11 = thrust::get<1>(inout);
-    int &s11 = thrust::get<2>(inout);
+  void operator()(int idx) {
+    uint64_t key = p1q1.KeyAt(idx);
+    if (key == SparseEdgeEdgeMap::Open() ||
+        key == SparseEdgeEdgeMap::Tombstone())
+      return;
+    const int p1 = key >> 32;
+    const int q1 = key;
+
+    glm::vec4 &xyzz11 = p1q1.At(idx).second;
+    int &s11 = p1q1.At(idx).first;
 
     // For pRL[k], qRL[k], k==0 is the left and k==1 is the right.
     int k = 0;
@@ -246,7 +215,7 @@ struct Kernel11 {
     }
 
     if (s11 == 0) {  // No intersection
-      xyzz11 = glm::vec4(NAN);
+      p1q1.RemoveKey(idx);
     } else {
 #ifdef MANIFOLD_DEBUG
       // Assert left and right were both found
@@ -265,25 +234,17 @@ struct Kernel11 {
       const float dir = start2 < end2 ? normalP[p1s].z : normalP[p1e].z;
 
       if (!Shadows(xyzz11.z, xyzz11.w, expandP * dir)) s11 = 0;
+      if (!isfinite(xyzz11.x)) p1q1.RemoveKey(idx);
     }
   }
 };
 
-std::tuple<Vec<int>, Vec<glm::vec4>> Shadow11(SparseIndices &p1q1,
-                                              const Manifold::Impl &inP,
-                                              const Manifold::Impl &inQ,
-                                              float expandP) {
-  Vec<int> s11(p1q1.size());
-  Vec<glm::vec4> xyzz11(p1q1.size());
-
-  for_each_n(autoPolicy(p1q1.size()),
-             zip(countAt(0), xyzz11.begin(), s11.begin()), p1q1.size(),
+void Shadow11(SparseEdgeEdgeMap &p1q1, const Manifold::Impl &inP,
+              const Manifold::Impl &inQ, float expandP) {
+  for_each_n(autoPolicy(p1q1.Size()), countAt(0), p1q1.Size(),
              Kernel11({inP.vertPos_, inQ.vertPos_, inP.halfedge_, inQ.halfedge_,
-                       expandP, inP.vertNormal_, p1q1}));
-
-  p1q1.KeepFinite(xyzz11, s11);
-
-  return std::make_tuple(s11, xyzz11);
+                       expandP, inP.vertNormal_, p1q1.D()}));
+  p1q1.Resize();
 };
 
 struct Kernel02 {
@@ -292,14 +253,20 @@ struct Kernel02 {
   VecView<const glm::vec3> vertPosQ;
   const float expandP;
   VecView<const glm::vec3> vertNormalP;
-  const SparseIndices &p0q2;
+  SparseVertexFaceMap::Store p0q2;
   const bool forward;
 
-  void operator()(thrust::tuple<int, int &, float &> inout) {
-    const int p0 = p0q2.Get(thrust::get<0>(inout), !forward);
-    const int q2 = p0q2.Get(thrust::get<0>(inout), forward);
-    int &s02 = thrust::get<1>(inout);
-    float &z02 = thrust::get<2>(inout);
+  void operator()(int idx) {
+    uint64_t key = p0q2.KeyAt(idx);
+    if (key == SparseVertexFaceMap::Open() ||
+        key == SparseVertexFaceMap::Tombstone())
+      return;
+    uint32_t p0 = key >> 32;
+    uint32_t q2 = key;
+    if (!forward) std::swap(p0, q2);
+
+    int &s02 = p0q2.At(idx).first;
+    float &z02 = p0q2.At(idx).second;
 
     // For yzzLR[k], k==0 is the left and k==1 is the right.
     int k = 0;
@@ -342,7 +309,7 @@ struct Kernel02 {
     }
 
     if (s02 == 0) {  // No intersection
-      z02 = NAN;
+      p0q2.RemoveKey(idx);
     } else {
 #ifdef MANIFOLD_DEBUG
       // Assert left and right were both found
@@ -359,35 +326,23 @@ struct Kernel02 {
         if (!Shadows(z02, vertPos.z, expandP * vertNormalP[closestVert].z))
           s02 = 0;
       }
+      if (!isfinite(z02)) p0q2.RemoveKey(idx);
     }
   }
 };
 
-std::tuple<Vec<int>, Vec<float>> Shadow02(const Manifold::Impl &inP,
-                                          const Manifold::Impl &inQ,
-                                          SparseIndices &p0q2, bool forward,
-                                          float expandP) {
-  Vec<int> s02(p0q2.size());
-  Vec<float> z02(p0q2.size());
-
+void Shadow02(const Manifold::Impl &inP, const Manifold::Impl &inQ,
+              SparseVertexFaceMap &p0q2, bool forward, float expandP) {
   auto vertNormalP = forward ? inP.vertNormal_ : inQ.vertNormal_;
-  for_each_n(autoPolicy(p0q2.size()), zip(countAt(0), s02.begin(), z02.begin()),
-             p0q2.size(),
+  for_each_n(autoPolicy(p0q2.Size()), countAt(0), p0q2.Size(),
              Kernel02({inP.vertPos_, inQ.halfedge_, inQ.vertPos_, expandP,
-                       vertNormalP, p0q2, forward}));
-
-  p0q2.KeepFinite(z02, s02);
-
-  return std::make_tuple(s02, z02);
+                       vertNormalP, p0q2.D(), forward}));
+  p0q2.Resize();
 };
 
 struct Kernel12 {
-  VecView<const int64_t> p0q2;
-  VecView<const int> s02;
-  VecView<const float> z02;
-  VecView<const int64_t> p1q1;
-  VecView<const int> s11;
-  VecView<const glm::vec4> xyzz11;
+  const SparseVertexFaceMap::Store p0q2;
+  const SparseEdgeEdgeMap::Store p1q1;
   VecView<const Halfedge> halfedgesP;
   VecView<const Halfedge> halfedgesQ;
   VecView<const glm::vec3> vertPosP;
@@ -412,18 +367,19 @@ struct Kernel12 {
     const Halfedge edge = halfedgesP[p1];
 
     for (int vert : {edge.startVert, edge.endVert}) {
-      const int64_t key = forward ? SparseIndices::EncodePQ(vert, q2)
-                                  : SparseIndices::EncodePQ(q2, vert);
-      const int idx = monobound_quaternary_search(p0q2, key);
-      if (idx != -1) {
-        const int s = s02[idx];
+      const uint64_t key = forward ? SparseIndices::EncodePQ(vert, q2)
+                                   : SparseIndices::EncodePQ(q2, vert);
+      const uint32_t idx = p0q2.GetIdx(key);
+      const uint64_t foundKey = p0q2.KeyAt(idx);
+      if (foundKey == key) {
+        const int s = p0q2.At(idx).first;
         x12 += s * ((vert == edge.startVert) == forward ? 1 : -1);
         if (k < 2 && (k == 0 || (s != 0) != shadows)) {
           shadows = s != 0;
           xzyLR0[k] = vertPosP[vert];
           thrust::swap(xzyLR0[k].y, xzyLR0[k].z);
           xzyLR1[k] = xzyLR0[k];
-          xzyLR1[k][1] = z02[idx];
+          xzyLR1[k][1] = p0q2.At(idx).second;
           k++;
         }
       }
@@ -433,15 +389,17 @@ struct Kernel12 {
       const int q1 = 3 * q2 + i;
       const Halfedge edge = halfedgesQ[q1];
       const int q1F = edge.IsForward() ? q1 : edge.pairedHalfedge;
-      const int64_t key = forward ? SparseIndices::EncodePQ(p1, q1F)
-                                  : SparseIndices::EncodePQ(q1F, p1);
-      const int idx = monobound_quaternary_search(p1q1, key);
-      if (idx != -1) {  // s is implicitly zero for anything not found
-        const int s = s11[idx];
+      const uint64_t key = forward ? SparseIndices::EncodePQ(p1, q1F)
+                                   : SparseIndices::EncodePQ(q1F, p1);
+      const uint32_t idx = p1q1.GetIdx(key);
+      const uint64_t foundKey = p1q1.KeyAt(idx);
+      // s is implicitly zero for anything not found
+      if (foundKey == key) {
+        const int s = p1q1.At(idx).first;
         x12 -= s * (edge.IsForward() ? 1 : -1);
         if (k < 2 && (k == 0 || (s != 0) != shadows)) {
           shadows = s != 0;
-          const glm::vec4 xyzz = xyzz11[idx];
+          const glm::vec4 xyzz = p1q1.At(idx).second;
           xzyLR0[k][0] = xyzz.x;
           xzyLR0[k][1] = xyzz.z;
           xzyLR0[k][2] = xyzz.y;
@@ -472,18 +430,16 @@ struct Kernel12 {
 };
 
 std::tuple<Vec<int>, Vec<glm::vec3>> Intersect12(
-    const Manifold::Impl &inP, const Manifold::Impl &inQ, const Vec<int> &s02,
-    const SparseIndices &p0q2, const Vec<int> &s11, const SparseIndices &p1q1,
-    const Vec<float> &z02, const Vec<glm::vec4> &xyzz11, SparseIndices &p1q2,
-    bool forward) {
+    const Manifold::Impl &inP, const Manifold::Impl &inQ,
+    const SparseVertexFaceMap &p0q2, const SparseEdgeEdgeMap &p1q1,
+    SparseIndices &p1q2, bool forward) {
   Vec<int> x12(p1q2.size());
   Vec<glm::vec3> v12(p1q2.size());
 
-  for_each_n(
-      autoPolicy(p1q2.size()), zip(countAt(0), x12.begin(), v12.begin()),
-      p1q2.size(),
-      Kernel12({p0q2.AsVec64(), s02, z02, p1q1.AsVec64(), s11, xyzz11,
-                inP.halfedge_, inQ.halfedge_, inP.vertPos_, forward, p1q2}));
+  for_each_n(autoPolicy(p1q2.size()), zip(countAt(0), x12.begin(), v12.begin()),
+             p1q2.size(),
+             Kernel12({p0q2.D(), p1q1.D(), inP.halfedge_, inQ.halfedge_,
+                       inP.vertPos_, forward, p1q2}));
 
   p1q2.KeepFinite(v12, x12);
 
@@ -494,9 +450,7 @@ Vec<int> Winding03(const Manifold::Impl &inP, Vec<int> &vertices, Vec<int> &s02,
                    bool reverse) {
   // verts that are not shadowed (not in p0q2) have winding number zero.
   Vec<int> w03(inP.NumVert(), 0);
-  // checking is slow, so just sort and reduce
   auto policy = autoPolicy(vertices.size());
-  stable_sort_by_key(policy, vertices.begin(), vertices.end(), s02.begin());
   Vec<int> w03val(w03.size());
   Vec<int> w03vert(w03.size());
   // sum known s02 values into w03 (winding number)
@@ -546,17 +500,30 @@ Boolean3::Boolean3(const Manifold::Impl &inP, const Manifold::Impl &inQ,
 
   // Level 2
   // Find vertices that overlap faces in XY-projection
-  SparseIndices p0q2 = inQ.VertexCollisionsZ(inP.vertPos_);
-  p0q2.Sort();
-  PRINT("p0q2 size = " << p0q2.size());
+  SparseVertexFaceMap p0q2 = inQ.VertexCollisionsZ(inP.vertPos_);
+  PRINT("p0q2 size = " << p0q2.Entries());
 
-  SparseIndices p2q0 = inP.VertexCollisionsZ(inQ.vertPos_, true);  // inverted
-  p2q0.Sort();
-  PRINT("p2q0 size = " << p2q0.size());
+  SparseVertexFaceMap p2q0 =
+      inP.VertexCollisionsZ(inQ.vertPos_, true);  // inverted
+  PRINT("p2q0 size = " << p2q0.Entries());
 
   // Find involved edge pairs from Level 3
-  SparseIndices p1q1 = Filter11(inP_, inQ_, p1q2_, p2q1_);
-  PRINT("p1q1 size = " << p1q1.size());
+  SparseEdgeEdgeMap p1q1 = Filter11(inP_, inQ_, p1q2_, p2q1_);
+  // {
+  //   SparseIndices tmp;
+  //   for (int i = 0; i < p1q1.Size(); ++i) {
+  //     uint64_t key = p1q1.D().KeyAt(i);
+  //     if (key == SparseEdgeEdgeMap::Open() ||
+  //         key == SparseEdgeEdgeMap::Tombstone())
+  //       continue;
+  //     tmp.Add(static_cast<int32_t>(key >> 32), static_cast<int32_t>(key));
+  //   }
+  //   sort(autoPolicy(tmp.size()), tmp.AsVec64().begin(), tmp.AsVec64().end());
+  //   for (int i = 0; i < tmp.size(); ++i) {
+  //     printf("%d %d\n", tmp.Get(i, false), tmp.Get(i, true));
+  //   }
+  // }
+  PRINT("p1q1 size = " << p1q1.Entries());
 
 #ifdef MANIFOLD_DEBUG
   broad.Stop();
@@ -567,43 +534,146 @@ Boolean3::Boolean3(const Manifold::Impl &inP, const Manifold::Impl &inQ,
   // Level 2
   // Build up XY-projection intersection of two edges, including the z-value for
   // each edge, keeping only those whose intersection exists.
-  Vec<int> s11;
-  Vec<glm::vec4> xyzz11;
-  std::tie(s11, xyzz11) = Shadow11(p1q1, inP, inQ, expandP_);
-  PRINT("s11 size = " << s11.size());
+  Shadow11(p1q1, inP, inQ, expandP_);
+
+  // {
+  //   SparseIndices tmp;
+  //   Vec<int> tmp1;
+  //   Vec<glm::vec4> tmp2;
+  //   for (int i = 0; i < p1q1.Size(); ++i) {
+  //     uint64_t key = p1q1.D().KeyAt(i);
+  //     if (key == SparseEdgeEdgeMap::Open() ||
+  //         key == SparseEdgeEdgeMap::Tombstone())
+  //       continue;
+  //     tmp.Add(static_cast<int32_t>(key >> 32), static_cast<int32_t>(key));
+  //     tmp1.push_back(p1q1.D().At(i).first);
+  //     tmp2.push_back(p1q1.D().At(i).second);
+  //   }
+  //   sort_by_key(autoPolicy(tmp.size()), tmp.AsVec64().begin(),
+  //               tmp.AsVec64().end(), zip(tmp1.begin(), tmp2.begin()));
+  //   for (int i = 0; i < tmp.size(); ++i) {
+  //     printf("%d %d -> %d (%.3f, %.3f, %.3f, %.3f)\n", tmp.Get(i, false),
+  //            tmp.Get(i, true), tmp1[i], tmp2[i].x, tmp2[i].y, tmp2[i].z,
+  //            tmp2[i].w);
+  //   }
+  // }
+  PRINT("s11 size = " << p1q1.Entries());
 
   // Build up Z-projection of vertices onto triangles, keeping only those that
   // fall inside the triangle.
-  Vec<int> s02;
-  Vec<float> z02;
-  std::tie(s02, z02) = Shadow02(inP, inQ, p0q2, true, expandP_);
-  PRINT("s02 size = " << s02.size());
-
-  Vec<int> s20;
-  Vec<float> z20;
-  std::tie(s20, z20) = Shadow02(inQ, inP, p2q0, false, expandP_);
-  PRINT("s20 size = " << s20.size());
+  Shadow02(inP, inQ, p0q2, true, expandP_);
+  // {
+  //   SparseIndices tmp;
+  //   Vec<int> tmp1;
+  //   Vec<float> tmp2;
+  //   for (int i = 0; i < p0q2.Size(); ++i) {
+  //     uint64_t key = p0q2.D().KeyAt(i);
+  //     if (key == SparseEdgeEdgeMap::Open() ||
+  //         key == SparseEdgeEdgeMap::Tombstone())
+  //       continue;
+  //     tmp.Add(static_cast<int32_t>(key >> 32), static_cast<int32_t>(key));
+  //     tmp1.push_back(p0q2.D().At(i).first);
+  //     tmp2.push_back(p0q2.D().At(i).second);
+  //   }
+  //   sort_by_key(autoPolicy(tmp.size()), tmp.AsVec64().begin(),
+  //               tmp.AsVec64().end(), zip(tmp1.begin(), tmp2.begin()));
+  //   for (int i = 0; i < tmp.size(); ++i) {
+  //     printf("%d %d -> %d %.3f\n", tmp.Get(i, false), tmp.Get(i, true),
+  //     tmp1[i],
+  //            tmp2[i]);
+  //   }
+  // }
+  PRINT("s02 size = " << p0q2.Entries());
+  Shadow02(inQ, inP, p2q0, false, expandP_);
+  // {
+  //   SparseIndices tmp;
+  //   Vec<int> tmp1;
+  //   Vec<float> tmp2;
+  //   for (int i = 0; i < p2q0.Size(); ++i) {
+  //     uint64_t key = p2q0.D().KeyAt(i);
+  //     if (key == SparseEdgeEdgeMap::Open() ||
+  //         key == SparseEdgeEdgeMap::Tombstone())
+  //       continue;
+  //     tmp.Add(static_cast<int32_t>(key >> 32), static_cast<int32_t>(key));
+  //     tmp1.push_back(p2q0.D().At(i).first);
+  //     tmp2.push_back(p2q0.D().At(i).second);
+  //   }
+  //   sort_by_key(autoPolicy(tmp.size()), tmp.AsVec64().begin(),
+  //               tmp.AsVec64().end(), zip(tmp1.begin(), tmp2.begin()));
+  //   for (int i = 0; i < tmp.size(); ++i) {
+  //     printf("%d %d -> %d %.3f\n", tmp.Get(i, false), tmp.Get(i, true),
+  //     tmp1[i],
+  //            tmp2[i]);
+  //   }
+  // }
+  PRINT("s20 size = " << p2q0.Entries());
 
   // Level 3
   // Build up the intersection of the edges and triangles, keeping only those
   // that intersect, and record the direction the edge is passing through the
   // triangle.
-  std::tie(x12_, v12_) =
-      Intersect12(inP, inQ, s02, p0q2, s11, p1q1, z02, xyzz11, p1q2_, true);
+  // TODO: bug here
+  std::tie(x12_, v12_) = Intersect12(inP, inQ, p0q2, p1q1, p1q2_, true);
+  // for (int i = 0; i < x12_.size(); ++i) {
+  //   printf("%d %d -> %d (%.3f, %.3f, %.3f)\n", p1q2_.Get(i, false),
+  //          p1q2_.Get(i, true), x12_[i], v12_[i].x, v12_[i].y, v12_[i].z);
+  // }
   PRINT("x12 size = " << x12_.size());
 
-  std::tie(x21_, v21_) =
-      Intersect12(inQ, inP, s20, p2q0, s11, p1q1, z20, xyzz11, p2q1_, false);
+  std::tie(x21_, v21_) = Intersect12(inQ, inP, p2q0, p1q1, p2q1_, false);
+  // for (int i = 0; i < p2q1_.size(); ++i) {
+  //   printf("%d %d -> %d (%.3f, %.3f, %.3f)\n", p2q1_.Get(i, false),
+  //          p2q1_.Get(i, true), x21_[i], v21_[i].x, v21_[i].y, v21_[i].z);
+  // }
   PRINT("x21 size = " << x21_.size());
 
-  Vec<int> p0 = p0q2.Copy(false);
-  p0q2.Resize(0);
-  Vec<int> q0 = p2q0.Copy(true);
-  p2q0.Resize(0);
   // Sum up the winding numbers of all vertices.
-  w03_ = Winding03(inP, p0, s02, false);
+  {
+    Vec<int> p0(p0q2.Entries());
+    Vec<int> s02(p0q2.Entries());
+    Vec<Uint64> keys;
+    Vec<std::pair<int, float>> values;
+    std::tie(keys, values) = p0q2.Move();
+    sort_by_key(autoPolicy(keys.size()), keys.begin(), keys.end(),
+                values.begin());
+    for_each_n(autoPolicy(p0.size()), countAt(0), p0.size(), [&](int i) {
+      p0[i] = keys[i] >> 32;
+      s02[i] = values[i].first;
+    });
+    keys.resize(0);
+    values.resize(0);
+    // for (int i = 0; i < p0.size(); ++i) {
+    //   printf("%d -> %d\n", p0[i], s02[i]);
+    // }
+    w03_ = Winding03(inP, p0, s02, false);
+  }
 
-  w30_ = Winding03(inQ, q0, s20, true);
+  {
+    // printf("p2q0.Entries() = %d\n", p2q0.Entries());
+    Vec<int> q0(p2q0.Entries());
+    Vec<int> s20(p2q0.Entries());
+    Vec<Uint64> keys;
+    Vec<std::pair<int, float>> values;
+    std::tie(keys, values) = p2q0.Move();
+    for_each_n(autoPolicy(keys.size()), countAt(0), keys.size(), [&](int i) {
+      uint64_t key = keys[i];
+      keys[i] =
+          ((key & std::numeric_limits<uint32_t>::max()) << 32) | key >> 32;
+    });
+    sort_by_key(autoPolicy(keys.size()), keys.begin(), keys.end(),
+                values.begin());
+    for_each_n(autoPolicy(q0.size()), countAt(0), q0.size(), [&](int i) {
+      q0[i] = keys[i] >> 32;
+      s20[i] = values[i].first;
+    });
+    keys.resize(0);
+    values.resize(0);
+    // for (int i = 0; i < q0.size(); ++i) {
+    //   printf("%d -> %d\n", q0[i], s20[i]);
+    // }
+    // std::cout.flush();
+    w30_ = Winding03(inQ, q0, s20, true);
+  }
 
 #ifdef MANIFOLD_DEBUG
   intersections.Stop();

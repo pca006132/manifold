@@ -110,31 +110,38 @@ inline int Prev3(int i) {
 
 template <typename T>
 T AtomicAdd(T& target, T add) {
-#ifdef __CUDA_ARCH__
-  // required for synchronization
-  __threadfence();
-  return atomicAdd(&target, add);
-#else
   std::atomic<T>& tar = reinterpret_cast<std::atomic<T>&>(target);
   T old_val = tar.load();
   while (!tar.compare_exchange_weak(old_val, old_val + add,
                                     std::memory_order_seq_cst))
     ;
   return old_val;
-#endif
 }
 
 template <>
 inline int AtomicAdd(int& target, int add) {
-#ifdef __CUDA_ARCH__
-  // required for synchronization
-  __threadfence();
-  return atomicAdd(&target, add);
-#else
   std::atomic<int>& tar = reinterpret_cast<std::atomic<int>&>(target);
   int old_val = tar.fetch_add(add, std::memory_order_seq_cst);
   return old_val;
-#endif
+}
+
+template <>
+inline unsigned int AtomicAdd(unsigned int& target, unsigned int add) {
+  std::atomic<unsigned int>& tar = reinterpret_cast<std::atomic<unsigned int>&>(target);
+  int old_val = tar.fetch_add(add, std::memory_order_seq_cst);
+  return old_val;
+}
+
+inline int AtomicSub(int& target, int sub) {
+  std::atomic<int>& tar = reinterpret_cast<std::atomic<int>&>(target);
+  int old_val = tar.fetch_sub(sub, std::memory_order_seq_cst);
+  return old_val;
+}
+
+inline unsigned int AtomicSub(unsigned int& target, unsigned int sub) {
+  std::atomic<unsigned int>& tar = reinterpret_cast<std::atomic<unsigned int>&>(target);
+  int old_val = tar.fetch_sub(sub, std::memory_order_seq_cst);
+  return old_val;
 }
 
 // Copied from

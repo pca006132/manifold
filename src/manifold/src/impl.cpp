@@ -877,11 +877,11 @@ SparseIndices Manifold::Impl::EdgeCollisions(const Impl& Q,
  * Returns a sparse array of the input vertices that project inside the XY
  * bounding boxes of the faces of this manifold.
  */
-SparseIndices Manifold::Impl::VertexCollisionsZ(
+SparseVertexFaceMap Manifold::Impl::VertexCollisionsZ(
     VecView<const glm::vec3> vertsIn, bool inverted) const {
   if (inverted)
-    return collider_.Collisions<false, true>(vertsIn);
+    return collider_.VertexFaceCollisions<true>(vertsIn);
   else
-    return collider_.Collisions<false, false>(vertsIn);
+    return collider_.VertexFaceCollisions<false>(vertsIn);
 }
 }  // namespace manifold
