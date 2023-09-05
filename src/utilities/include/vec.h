@@ -44,7 +44,9 @@ class VecView {
   using Iter = T *;
   using IterC = const T *;
 
-  VecView(T *ptr_, int size_) : ptr_(ptr_), size_(size_) {}
+  VecView(T *ptr_, int size_) : ptr_(ptr_), size_(size_) {
+    if (size_ < 0) throw std::runtime_error("vector size overflow");
+  }
 
   VecView(const VecView &other) {
     ptr_ = other.ptr_;
@@ -61,12 +63,20 @@ class VecView {
   operator VecView<const T>() const { return {ptr_, size_}; }
 
   inline const T &operator[](int i) const {
-    if (i < 0 || i >= size_) throw std::out_of_range("Vec out of range");
+    if (i < 0 || i >= size_) {
+      printf("i: %d, n: %d\n", i, size_);
+      __builtin_trap();
+      throw std::out_of_range("Vec out of range");
+    }
     return ptr_[i];
   }
 
   inline T &operator[](int i) {
-    if (i < 0 || i >= size_) throw std::out_of_range("Vec out of range");
+    if (i < 0 || i >= size_) {
+      printf("i: %d, n: %d\n", i, size_);
+      __builtin_trap();
+      throw std::out_of_range("Vec out of range");
+    }
     return ptr_[i];
   }
 
@@ -239,6 +249,7 @@ class Vec : public VecView<T> {
   }
 
   void reserve(int n) {
+    if (n < 0) throw std::runtime_error("vector size overflow");
     if (n > capacity_) {
       T *newBuffer = reinterpret_cast<T *>(malloc(n * sizeof(T)));
       if (newBuffer == nullptr) throw std::bad_alloc();
@@ -256,6 +267,7 @@ class Vec : public VecView<T> {
   }
 
   void resize(int newSize, T val = T()) {
+    if (newSize < 0) throw std::runtime_error("vector size overflow");
     bool shrink = this->size_ > 2 * newSize;
     reserve(newSize);
     if (this->size_ < newSize) {
