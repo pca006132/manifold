@@ -13,12 +13,16 @@
 // limitations under the License.
 
 #include <random>
+#include <set>
 
+#include "QuickHull.hpp"
 #include "csg_tree.h"
 #include "glm/gtx/norm.hpp"
 #include "impl.h"
 
 namespace {
+constexpr float kCollinear = 0.00001;
+
 using namespace manifold;
 using namespace glm;
 
@@ -328,6 +332,198 @@ void recursiveCut(Manifold part, const VecView<const Halfedge> halfedges,
   recursiveCut(pair.second, halfedges, vertPos, b, results);
 }
 
+// Reference: A 3D surface offset method for STL-format models
+vec3 averageNormal(const vec3& a, const vec3& b) {
+  float ab = dot(a, b);
+  if (ab >= 1 - kCollinear) return a;
+
+  mat2 m = {1, ab,  //
+            ab, 1};
+  mat2 invM = inverse(m);
+  vec2 weights = invM * vec2(1, 1);
+  return normalize(a * weights.x + b * weights.y);
+}
+
+vec3 averageNormal(const vec3& a, const vec3& b, const vec3& c) {
+  float ab = dot(a, b);
+  float ac = dot(a, c);
+  float bc = dot(b, c);
+
+  if (ab >= 1 - kCollinear) return averageNormal(b, c);
+  if (ac >= 1 - kCollinear) return averageNormal(a, b);
+  if (bc >= 1 - kCollinear) return averageNormal(a, c);
+
+  mat3 m = {1,  ab, ac,  //
+            ab, 1,  bc,  //
+            ac, bc, 1};
+  mat3 invM = inverse(m);
+  vec3 weights = invM * vec3(1, 1, 1);
+  return normalize(a * weights.x + b * weights.y + c * weights.z);
+}
+
+// reference: Offset triangular mesh using multiple normal vectors of a vertex
+void MultiNormalOffset(const Manifold::Impl& impl, float offset) {
+  Vec<bool> processed(impl.NumVert(), false);
+  int numVert = impl.NumVert();
+  int numHalfedge = impl.halfedge_.size();
+  for (int i = 0; i < numHalfedge; ++i) {
+    // skip newly added vertices
+    if (impl.halfedge_[i].startVert >= numVert) continue;
+    // skip processed vertices
+    if (processed[impl.halfedge_[i].startVert]) continue;
+    processed[impl.halfedge_[i].startVert] = true;
+
+    std::vector<int> edges;
+    std::vector<vec3> normals;
+    std::vector<int> normalEdge;
+    auto addNormal = [&](const vec3 normal) {
+      for (int j = 0; j < normals.size(); ++j)
+        if (dot(normal, normals[j]) >= 1 - kCollinear) return j;
+      normals.push_back(normal);
+      return static_cast<int>(normals.size() - 1);
+    };
+    std::vector<std::pair<int, int>> edgeNormalMap;
+    // orbit startVert
+    int current = i;
+    do {
+      edges.push_back(current);
+      int a = addNormal(impl.faceNormal_[current / 3]);
+      int b = addNormal(
+          impl.faceNormal_[impl.halfedge_[current].pairedHalfedge / 3]);
+      edgeNormalMap.push_back({a, b});
+      if (a != b) normalEdge.push_back(current);
+      current = NextHalfedge(impl.halfedge_[current].pairedHalfedge);
+    } while (current != i);
+
+    std::vector<int> normalMap(normals.size());
+    // identity mapping by default
+    sequence(ExecutionPolicy::Seq, normalMap.begin(), normalMap.end());
+    if (normals.size() == 1) {
+      // just a plane
+      continue;
+    }
+
+    // handle concave normals
+    int originalNormalSize = normals.size();
+    std::vector<int> toRemove(originalNormalSize);
+    sequence(ExecutionPolicy::Seq, toRemove.begin(), toRemove.end());
+    for (int j = 0; j < originalNormalSize; ++j) {
+      vec3 a = normals[j];
+      vec3 b = normals[(j + 1) % originalNormalSize];
+      vec3 out = impl.vertPos_[impl.halfedge_[normalEdge[j]].endVert] -
+                 impl.vertPos_[impl.halfedge_[normalEdge[j]].startVert];
+      if (dot(cross(a, b), out) <= 0) {
+        // concave
+        vec3 newNormal = averageNormal(a, b);
+        int additional = -1;
+        if (originalNormalSize >= 3) {
+          // try after
+          vec3 c = normals[(j + 2) % originalNormalSize];
+          vec3 c1 = normals[(j + originalNormalSize - 1) % originalNormalSize];
+          Halfedge e = impl.halfedge_[normalEdge[(j + 2) % originalNormalSize]];
+          Halfedge e1 = impl.halfedge_[normalEdge[(j + originalNormalSize - 1) %
+                                                  originalNormalSize]];
+          out = impl.vertPos_[e.endVert] - impl.vertPos_[e.startVert];
+          vec3 out1 = impl.vertPos_[e.endVert] - impl.vertPos_[e.startVert];
+          if (dot(cross(b, c), out) <= 0) {
+            newNormal = averageNormal(a, b, c);
+            additional = (j + 2) % originalNormalSize;
+          } else if (dot(cross(c1, a), out1) <= 0) {
+            newNormal = averageNormal(c1, a, b);
+            additional = (j + originalNormalSize - 1) % originalNormalSize;
+          }
+        }
+        normalMap[j] = addNormal(newNormal);
+        normalMap[(j + 1) % originalNormalSize] = normalMap[j];
+        if (additional != -1) {
+          normalMap[additional] = normalMap[j];
+        }
+      }
+    }
+    for (int j = 0; j < originalNormalSize; ++j)
+      if (normalMap[j] < originalNormalSize) toRemove[normalMap[j]] = -1;
+
+    std::sort(toRemove.begin(), toRemove.end());
+    toRemove.erase(toRemove.begin(),
+                   std::upper_bound(toRemove.begin(), toRemove.end(), -1));
+    for (auto iter = toRemove.rbegin(); iter != toRemove.rend(); ++iter) {
+      normals.erase(normals.begin() + *iter);
+    }
+    for (int j = 0; j < originalNormalSize; ++j) {
+      int oldIndex = normalMap[j];
+      int count = std::count_if(toRemove.begin(), toRemove.end(),
+                                [oldIndex](int x) { return x < oldIndex; });
+      normalMap[j] -= count;
+    }
+    for (std::pair<int, int>& edge : edgeNormalMap) {
+      edge.first = normalMap[edge.first];
+      edge.second = normalMap[edge.second];
+    }
+
+    if (normals.size() >= 3) {
+      // project them onto a plane with normal = vertex normal,
+      // and x axis defined by edge normal furthest from vertex normal
+      // and order them in CW direction.
+      vec3 vertNormal = impl.vertNormal_[impl.halfedge_[i].startVert];
+
+      float minAngle = 1.0;
+      int minIndex = -1;
+      for (int j = 0; j < normals.size(); ++j) {
+        float angle = abs(dot(normals[j], vertNormal));
+        if (angle < minAngle) minAngle = angle;
+        minIndex = j;
+      }
+      vec3 xaxis = normalize(normals[minIndex] -
+                             vertNormal * dot(normals[minIndex], vertNormal));
+      vec3 yaxis = cross(vertNormal, xaxis);
+      Vec<float> angles;
+      Vec<int> normalMap(normals.size());
+      sequence(ExecutionPolicy::Seq, normalMap.begin(), normalMap.end());
+      for (const vec3& normal : normals) {
+        angles.push_back(atan2(dot(normal, yaxis), dot(normal, xaxis)));
+      }
+      std::stable_sort(zip(angles.begin(), normals.begin(), normalMap.begin()),
+                       zip(angles.end(), normals.end(), normalMap.end()),
+                       [](const thrust::tuple<float, vec3, int>& a,
+                          const thrust::tuple<float, vec3, int>& b) {
+                         return thrust::get<0>(a) > thrust::get<0>(b);
+                       });
+      int lastSecond = -1;
+      int s = normalMap.size();
+
+      for (std::pair<int, int>& pair : edgeNormalMap) {
+        pair.first = normalMap[pair.first];
+        pair.second = normalMap[pair.second];
+        if (pair.second == lastSecond) std::swap(pair.first, pair.second);
+#if MANIFOLD_DEBUG
+        ASSERT(lastSecond == -1 || lastSecond == pair.first ||
+                   (lastSecond + 1) % s == pair.first,
+               logicErr, "expects monotone normal angle");
+#endif
+        lastSecond = pair.second;
+      }
+#if MANIFOLD_DEBUG
+      // check normal projection forms a convex polygon
+      for (int j = 0; j < normals.size(); ++j) {
+        vec3 a = normals[(j + 1) % normals.size()] - normals[j];
+        vec3 b = normals[(j + 2) % normals.size()] -
+                 normals[(j + 1) % normals.size()];
+        ASSERT(dot(cross(a, b), vertNormal) <= 0, logicErr,
+               "expects convex projection");
+      }
+#endif
+    }
+
+    // impl.vertPos_[impl.halfedge_[i].startVert] += normals.front() * offset;
+
+    // two special cases
+    // 1. edge v->u contributes two vertices v1 v2
+    //    new triangle u v1 v2, u -> v2 and v1 -> u
+    // 2. adjacent edges v -> u1, v -> u2 contribute to different vertices
+    //    we split the triangle v u2 u1 into two triangles
+  }
+}
+
 };  // namespace
 
 namespace manifold {
@@ -352,8 +548,12 @@ std::vector<Manifold> Manifold::OffsetDecomposition(float offset) const {
 
     auto policy = autoPolicy(new2old.size());
     sequence(policy, new2old.begin(), new2old.end());
-    sort_by_key(policy, mortonCodes.begin(), mortonCodes.end(),
-                new2old.begin());
+    stable_sort(policy, zip(mortonCodes.begin(), new2old.begin()),
+                zip(mortonCodes.end(), new2old.end()),
+                [](const thrust::tuple<uint32_t, int>& a,
+                   const thrust::tuple<uint32_t, int>& b) {
+                  return thrust::get<0>(a) < thrust::get<0>(b);
+                });
     // permute boxes
     Vec<Box> tmp(std::move(boxes));
     boxes.resize(new2old.size());
@@ -410,5 +610,11 @@ std::vector<Manifold> Manifold::OffsetDecomposition(float offset) const {
                  results);
     return results;
   }
+}
+
+Manifold Manifold::NaiveOffset(float offset) const {
+  auto pImpl_ = GetCsgLeafNode().GetImpl();
+  MultiNormalOffset(*pImpl_, offset);
+  return *this;
 }
 }  // namespace manifold

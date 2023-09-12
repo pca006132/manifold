@@ -15,32 +15,41 @@
 #include <algorithm>
 
 #include "manifold.h"
-#include "meshIO.h"
 #include "samples.h"
 #include "test.h"
 
 TEST(Offset, Sphere) {
   Manifold sphere = Manifold::Sphere(5);
   sphere += sphere.Translate({12, 0, 0});
+  sphere.NaiveOffset(2);
   std::cout << sphere.OffsetDecomposition(2).size() << std::endl;
 }
 
+TEST(Offset, CubeSphere) {
+  Manifold cubesphere = Manifold::Cube({8, 8, 8}, true) - Manifold::Sphere(5);
+  cubesphere.NaiveOffset(2);
+  std::cout << cubesphere.OffsetDecomposition(0.5).size() << std::endl;
+}
+
 TEST(Offset, Cube) {
-  Manifold Cube = Manifold::Cube(glm::vec3(10.0f));
-  Cube += Cube.Translate({11.5, 0, 0});
-  Cube += Cube.Translate({0, 11.5, 0});
-  std::cout << Cube.OffsetDecomposition(1).size() << std::endl;
+  Manifold cube = Manifold::Cube(glm::vec3(10.0f));
+  cube.NaiveOffset(2);
+  // cube += cube.Translate({11.5, 0, 0});
+  // cube += cube.Translate({0, 11.5, 0});
+  // std::cout << cube.OffsetDecomposition(1).size() << std::endl;
 }
 
 TEST(Offset, CubeC) {
-  Manifold Cube = Manifold::Cube(glm::vec3(20.0f, 20.0f, 10.0f));
-  Cube -= Manifold::Cube(glm::vec3(10.0f)).Translate({10.0f, 5.0f, 0});
-  std::cout << Cube.OffsetDecomposition(1).size() << std::endl;
+  Manifold cube = Manifold::Cube(glm::vec3(20.0f, 20.0f, 10.0f));
+  cube -= Manifold::Cube(glm::vec3(10.0f)).Translate({10.0f, 5.0f, 0});
+  cube.NaiveOffset(2);
+  std::cout << cube.OffsetDecomposition(1).size() << std::endl;
 }
 
 TEST(Offset, CubeC2) {
-  Manifold Cube = Manifold::Cube(glm::vec3(20.0f, 20.0f, 10.0f));
-  Cube -=
+  Manifold cube = Manifold::Cube(glm::vec3(20.0f, 20.0f, 10.0f));
+  cube -=
       Manifold::Cube(glm::vec3(10.0f, 2.0f, 10.0f)).Translate({10.0f, 9.0f, 0});
-  std::cout << Cube.OffsetDecomposition(1).size() << std::endl;
+  cube.NaiveOffset(2);
+  std::cout << cube.OffsetDecomposition(1).size() << std::endl;
 }
