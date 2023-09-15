@@ -17,6 +17,7 @@
 
 #include "QuickHull.hpp"
 #include "csg_tree.h"
+#include "glm/ext.hpp"
 #include "glm/gtx/norm.hpp"
 #include "impl.h"
 
@@ -209,7 +210,8 @@ Halfspace findSeparatingPlane(const std::array<vec3, 3>& a,
 
   for (int i : {0, 1, 2}) {
     for (int j : {0, 1, 2}) {
-      vec axis = normalize(cross(b[(j + 1) % 3] - b[j], a[(i + 1) % 3] - a[i]));
+      vec3 axis =
+          normalize(cross(b[(j + 1) % 3] - b[j], a[(i + 1) % 3] - a[i]));
       float aMin = std::numeric_limits<float>::max();
       float aMax = std::numeric_limits<float>::min();
       float bMin = std::numeric_limits<float>::max();
@@ -333,195 +335,249 @@ void recursiveCut(Manifold part, const VecView<const Halfedge> halfedges,
 }
 
 // Reference: A 3D surface offset method for STL-format models
-vec3 averageNormal(const vec3& a, const vec3& b) {
-  float ab = dot(a, b);
+dvec3 averageNormal(const dvec3& a, const dvec3& b) {
+  double ab = dot(a, b);
   if (ab >= 1 - kCollinear) return a;
 
-  mat2 m = {1, ab,  //
-            ab, 1};
-  mat2 invM = inverse(m);
-  vec2 weights = invM * vec2(1, 1);
+  dmat2 m = {1, ab,  //
+             ab, 1};
+  dmat2 invM = inverse(m);
+  dvec2 weights = invM * vec2(1, 1);
   return normalize(a * weights.x + b * weights.y);
 }
 
-vec3 averageNormal(const vec3& a, const vec3& b, const vec3& c) {
-  float ab = dot(a, b);
-  float ac = dot(a, c);
-  float bc = dot(b, c);
+dvec3 averageNormal(const dvec3& a, const dvec3& b, const dvec3& c) {
+  double ab = dot(a, b);
+  double ac = dot(a, c);
+  double bc = dot(b, c);
 
   if (ab >= 1 - kCollinear) return averageNormal(b, c);
   if (ac >= 1 - kCollinear) return averageNormal(a, b);
   if (bc >= 1 - kCollinear) return averageNormal(a, c);
 
-  mat3 m = {1,  ab, ac,  //
-            ab, 1,  bc,  //
-            ac, bc, 1};
-  mat3 invM = inverse(m);
-  vec3 weights = invM * vec3(1, 1, 1);
+  dmat3 m = {1,  ab, ac,  //
+             ab, 1,  bc,  //
+             ac, bc, 1};
+  dmat3 invM = inverse(m);
+  dvec3 weights = invM * vec3(1, 1, 1);
   return normalize(a * weights.x + b * weights.y + c * weights.z);
 }
 
 // reference: Offset triangular mesh using multiple normal vectors of a vertex
 void MultiNormalOffset(const Manifold::Impl& impl, float offset) {
-  Vec<bool> processed(impl.NumVert(), false);
-  int numVert = impl.NumVert();
-  int numHalfedge = impl.halfedge_.size();
-  for (int i = 0; i < numHalfedge; ++i) {
-    // skip newly added vertices
-    if (impl.halfedge_[i].startVert >= numVert) continue;
-    // skip processed vertices
-    if (processed[impl.halfedge_[i].startVert]) continue;
-    processed[impl.halfedge_[i].startVert] = true;
+  std::vector<bool> processed(impl.NumVert(), false);
+  std::vector<std::vector<int>> vertEdges(impl.NumVert());
+  std::vector<std::vector<dvec3>> vertNormals(impl.NumVert());
+  std::vector<std::pair<int, int>> edgeNormals(impl.halfedge_.size(), {-1, -1});
 
+  auto fn = [&](int i) {
+    int startVert = impl.halfedge_[i].startVert;
     std::vector<int> edges;
-    std::vector<vec3> normals;
-    std::vector<int> normalEdge;
-    auto addNormal = [&](const vec3 normal) {
+    std::vector<dvec3> normals;
+    auto addNormal = [&](const dvec3 normal) {
       for (int j = 0; j < normals.size(); ++j)
         if (dot(normal, normals[j]) >= 1 - kCollinear) return j;
       normals.push_back(normal);
       return static_cast<int>(normals.size() - 1);
     };
-    std::vector<std::pair<int, int>> edgeNormalMap;
-    // orbit startVert
+    // entry[i] is the edge where the two neighboring faces have normals
+    // normals[i] and normals[i+1]
+    std::vector<int> normalEdge;
+    std::vector<std::pair<int, int>> edgeNormalsLocal;
+    // orbit startVert, get all outgoing halfedges
     int current = i;
     do {
       edges.push_back(current);
       int a = addNormal(impl.faceNormal_[current / 3]);
       int b = addNormal(
           impl.faceNormal_[impl.halfedge_[current].pairedHalfedge / 3]);
-      edgeNormalMap.push_back({a, b});
+      edgeNormalsLocal.push_back({a, b});
       if (a != b) normalEdge.push_back(current);
       current = NextHalfedge(impl.halfedge_[current].pairedHalfedge);
+
+      // we only process if the edge is the smallest out-going edge
+      if (current < i) return;
     } while (current != i);
 
-    std::vector<int> normalMap(normals.size());
-    // identity mapping by default
-    sequence(ExecutionPolicy::Seq, normalMap.begin(), normalMap.end());
-    if (normals.size() == 1) {
-      // just a plane
-      continue;
-    }
+    ASSERT(normals.size() == 1 || normalEdge.size() == normals.size(), logicErr,
+           "normalEdge().size() should be equal to normals.size()");
 
-    // handle concave normals
     int originalNormalSize = normals.size();
-    std::vector<int> toRemove(originalNormalSize);
-    sequence(ExecutionPolicy::Seq, toRemove.begin(), toRemove.end());
-    for (int j = 0; j < originalNormalSize; ++j) {
-      vec3 a = normals[j];
-      vec3 b = normals[(j + 1) % originalNormalSize];
-      vec3 out = impl.vertPos_[impl.halfedge_[normalEdge[j]].endVert] -
-                 impl.vertPos_[impl.halfedge_[normalEdge[j]].startVert];
-      if (dot(cross(a, b), out) <= 0) {
-        // concave
-        vec3 newNormal = averageNormal(a, b);
-        int additional = -1;
-        if (originalNormalSize >= 3) {
-          // try after
-          vec3 c = normals[(j + 2) % originalNormalSize];
-          vec3 c1 = normals[(j + originalNormalSize - 1) % originalNormalSize];
-          Halfedge e = impl.halfedge_[normalEdge[(j + 2) % originalNormalSize]];
-          Halfedge e1 = impl.halfedge_[normalEdge[(j + originalNormalSize - 1) %
-                                                  originalNormalSize]];
-          out = impl.vertPos_[e.endVert] - impl.vertPos_[e.startVert];
-          vec3 out1 = impl.vertPos_[e.endVert] - impl.vertPos_[e.startVert];
-          if (dot(cross(b, c), out) <= 0) {
-            newNormal = averageNormal(a, b, c);
-            additional = (j + 2) % originalNormalSize;
-          } else if (dot(cross(c1, a), out1) <= 0) {
-            newNormal = averageNormal(c1, a, b);
-            additional = (j + originalNormalSize - 1) % originalNormalSize;
+    // handle concave normals
+    std::vector<int> normalMap(normals.size());
+    sequence(ExecutionPolicy::Seq, normalMap.begin(), normalMap.end());
+    if (originalNormalSize >= 2) {
+      std::vector<std::set<int>> consecutives;
+      for (int j = 0; j < originalNormalSize; ++j) consecutives.push_back({j});
+
+      for (int j = 0; j < originalNormalSize; ++j) {
+        dvec3 a = normals[j];
+        dvec3 b = normals[(j + 1) % originalNormalSize];
+        dvec3 out = impl.vertPos_[impl.halfedge_[normalEdge[j]].endVert] -
+                    impl.vertPos_[impl.halfedge_[normalEdge[j]].startVert];
+        if (dot(cross(a, b), out) <= 0) {
+          // concave
+          dvec3 newNormal = averageNormal(a, b);
+          int additional = -1;
+          if (originalNormalSize >= 3) {
+            dvec3 c = normals[(j + 2) % originalNormalSize];
+            dvec3 c1 =
+                normals[(j + originalNormalSize - 1) % originalNormalSize];
+            Halfedge e =
+                impl.halfedge_[normalEdge[(j + 2) % originalNormalSize]];
+            Halfedge e1 =
+                impl.halfedge_[normalEdge[(j + originalNormalSize - 1) %
+                                          originalNormalSize]];
+            out = impl.vertPos_[e.endVert] - impl.vertPos_[e.startVert];
+            dvec3 out1 = impl.vertPos_[e.endVert] - impl.vertPos_[e.startVert];
+            if (dot(cross(b, c), out) <= 0) {
+              newNormal = averageNormal(a, b, c);
+              additional = (j + 2) % originalNormalSize;
+            } else if (dot(cross(c1, a), out1) <= 0) {
+              newNormal = averageNormal(c1, a, b);
+              additional = (j + originalNormalSize - 1) % originalNormalSize;
+            }
+          }
+          normalMap[j] = addNormal(newNormal);
+          auto iter = std::find_if(
+              consecutives.begin(), consecutives.end(), [&](auto i) {
+                return std::find(i.begin(), i.end(), j) != i.end();
+              });
+          auto iter1 = std::find_if(
+              consecutives.begin(), consecutives.end(), [&](auto i) {
+                return std::find(i.begin(), i.end(),
+                                 (j + 1) % originalNormalSize) != i.end();
+              });
+          auto iter2 = std::find_if(
+              consecutives.begin(), consecutives.end(), [&](auto i) {
+                return std::find(i.begin(), i.end(), additional) != i.end();
+              });
+          if (iter2 != consecutives.end()) {
+            ASSERT(iter != consecutives.end(), logicErr, "cannot find set");
+            ASSERT(iter1 != consecutives.end(), logicErr, "cannot find set");
+            iter->insert(iter1->begin(), iter1->end());
+            iter->insert(iter2->begin(), iter2->end());
+            int a = std::distance(consecutives.begin(), iter);
+            int b = std::distance(consecutives.begin(), iter1);
+            int c = std::distance(consecutives.begin(), iter2);
+            if (b > c) std::swap(b, c);
+            if (c != consecutives.size() && a != c)
+              consecutives.erase(consecutives.begin() + c);
+            if (b != c && a != b) consecutives.erase(consecutives.begin() + b);
           }
         }
-        normalMap[j] = addNormal(newNormal);
-        normalMap[(j + 1) % originalNormalSize] = normalMap[j];
-        if (additional != -1) {
-          normalMap[additional] = normalMap[j];
+      }
+      // note that this just approximates the position
+      for (const auto& r : consecutives) {
+        if (r.size() > 1) {
+          dvec3 sum(0);
+          for (int index : r) sum += normalMap[index];
+          sum = normalize(sum);
+          int idx = addNormal(sum);
+          for (int index : r) normalMap[index] = idx;
         }
       }
     }
-    for (int j = 0; j < originalNormalSize; ++j)
-      if (normalMap[j] < originalNormalSize) toRemove[normalMap[j]] = -1;
 
-    std::sort(toRemove.begin(), toRemove.end());
-    toRemove.erase(toRemove.begin(),
-                   std::upper_bound(toRemove.begin(), toRemove.end(), -1));
-    for (auto iter = toRemove.rbegin(); iter != toRemove.rend(); ++iter) {
-      normals.erase(normals.begin() + *iter);
+    {
+      // remove unused normals
+      std::vector<int> toRemove(normals.size());
+      sequence(ExecutionPolicy::Seq, toRemove.begin(), toRemove.end());
+
+      for (int j = 0; j < originalNormalSize; ++j) toRemove[normalMap[j]] = -1;
+
+      std::sort(toRemove.begin(), toRemove.end());
+      toRemove.erase(toRemove.begin(),
+                     std::upper_bound(toRemove.begin(), toRemove.end(), -1));
+      // remove from the back, so the indices are unchanged
+      for (auto iter = toRemove.rbegin(); iter != toRemove.rend(); ++iter) {
+        normals.erase(normals.begin() + *iter);
+      }
+      // remap indices
+      for (int j = 0; j < originalNormalSize; ++j) {
+        int oldIndex = normalMap[j];
+        int count = std::count_if(toRemove.begin(), toRemove.end(),
+                                  [oldIndex](int x) { return x < oldIndex; });
+        normalMap[j] -= count;
+      }
+      for (std::pair<int, int>& edge : edgeNormalsLocal) {
+        edge.first = normalMap[edge.first];
+        edge.second = normalMap[edge.second];
+      }
     }
-    for (int j = 0; j < originalNormalSize; ++j) {
-      int oldIndex = normalMap[j];
-      int count = std::count_if(toRemove.begin(), toRemove.end(),
-                                [oldIndex](int x) { return x < oldIndex; });
-      normalMap[j] -= count;
-    }
-    for (std::pair<int, int>& edge : edgeNormalMap) {
-      edge.first = normalMap[edge.first];
-      edge.second = normalMap[edge.second];
-    }
+
+    dvec3 vertNormal(0);
+    for (auto& v : normals) vertNormal += v;
+    vertNormal = normalize(vertNormal);
 
     if (normals.size() >= 3) {
       // project them onto a plane with normal = vertex normal,
       // and x axis defined by edge normal furthest from vertex normal
       // and order them in CW direction.
-      vec3 vertNormal = impl.vertNormal_[impl.halfedge_[i].startVert];
-
-      float minAngle = 1.0;
-      int minIndex = -1;
+      // this requires at least 3 non-colinear normals...
+      float minCos = 2.0;
+      int maxIndex = -1;
       for (int j = 0; j < normals.size(); ++j) {
         float angle = abs(dot(normals[j], vertNormal));
-        if (angle < minAngle) minAngle = angle;
-        minIndex = j;
+        if (angle < minCos) minCos = angle;
+        maxIndex = j;
       }
-      vec3 xaxis = normalize(normals[minIndex] -
-                             vertNormal * dot(normals[minIndex], vertNormal));
-      vec3 yaxis = cross(vertNormal, xaxis);
-      Vec<float> angles;
+      dvec3 xaxis = normalize(normals[maxIndex] -
+                              vertNormal * dot(normals[maxIndex], vertNormal));
+      dvec3 yaxis = normalize(cross(vertNormal, xaxis));
+      Vec<double> angles;
       Vec<int> normalMap(normals.size());
       sequence(ExecutionPolicy::Seq, normalMap.begin(), normalMap.end());
-      for (const vec3& normal : normals) {
-        angles.push_back(atan2(dot(normal, yaxis), dot(normal, xaxis)));
+      for (const dvec3& normal : normals) {
+        double angle = atan2(dot(normal, yaxis), dot(normal, xaxis));
+        angles.push_back(angle);
       }
       std::stable_sort(zip(angles.begin(), normals.begin(), normalMap.begin()),
                        zip(angles.end(), normals.end(), normalMap.end()),
-                       [](const thrust::tuple<float, vec3, int>& a,
-                          const thrust::tuple<float, vec3, int>& b) {
+                       [](const thrust::tuple<double, dvec3, int>& a,
+                          const thrust::tuple<double, dvec3, int>& b) {
                          return thrust::get<0>(a) > thrust::get<0>(b);
                        });
       int lastSecond = -1;
       int s = normalMap.size();
 
-      for (std::pair<int, int>& pair : edgeNormalMap) {
+      for (std::pair<int, int>& pair : edgeNormalsLocal) {
         pair.first = normalMap[pair.first];
         pair.second = normalMap[pair.second];
-        if (pair.second == lastSecond) std::swap(pair.first, pair.second);
-#if MANIFOLD_DEBUG
-        ASSERT(lastSecond == -1 || lastSecond == pair.first ||
-                   (lastSecond + 1) % s == pair.first,
-               logicErr, "expects monotone normal angle");
-#endif
-        lastSecond = pair.second;
       }
 #if MANIFOLD_DEBUG
       // check normal projection forms a convex polygon
       for (int j = 0; j < normals.size(); ++j) {
-        vec3 a = normals[(j + 1) % normals.size()] - normals[j];
-        vec3 b = normals[(j + 2) % normals.size()] -
-                 normals[(j + 1) % normals.size()];
+        dvec3 a = normals[(j + 1) % normals.size()] - normals[j];
+        dvec3 b = normals[(j + 2) % normals.size()] -
+                  normals[(j + 1) % normals.size()];
         ASSERT(dot(cross(a, b), vertNormal) <= 0, logicErr,
                "expects convex projection");
       }
 #endif
     }
 
-    // impl.vertPos_[impl.halfedge_[i].startVert] += normals.front() * offset;
-
-    // two special cases
-    // 1. edge v->u contributes two vertices v1 v2
-    //    new triangle u v1 v2, u -> v2 and v1 -> u
-    // 2. adjacent edges v -> u1, v -> u2 contribute to different vertices
-    //    we split the triangle v u2 u1 into two triangles
-  }
+    int lastSecond = -1;
+    int s = normalMap.size();
+    for (int j = 0; j < edges.size(); ++j) {
+      std::pair<int, int>& pair = edgeNormalsLocal[j];
+      if (pair.second == lastSecond) std::swap(pair.first, pair.second);
+      ASSERT(lastSecond == -1 || lastSecond == pair.first ||
+                 (lastSecond + 1) % s == pair.first,
+             logicErr, "expects monotone normal angle");
+      ASSERT(pair.first == pair.second || (pair.first + 1) % s == pair.second,
+             logicErr, "expects monotone normal angle");
+      lastSecond = pair.second;
+    }
+    vertEdges[startVert] = edges;
+    vertNormals[startVert] = normals;
+    for (int j = 0; j < edges.size(); ++j) {
+      edgeNormals[edges[j]] = edgeNormalsLocal[j];
+    }
+  };
+  for_each(ExecutionPolicy::Seq, countAt(0), countAt(impl.halfedge_.size()),
+           fn);
+  // handle vertex splitting...
 }
 
 };  // namespace
@@ -613,8 +669,10 @@ std::vector<Manifold> Manifold::OffsetDecomposition(float offset) const {
 }
 
 Manifold Manifold::NaiveOffset(float offset) const {
-  auto pImpl_ = GetCsgLeafNode().GetImpl();
+  auto pImpl_ = std::make_shared<Manifold::Impl>();
+  *pImpl_ = *GetCsgLeafNode().GetImpl();
   MultiNormalOffset(*pImpl_, offset);
-  return *this;
+  pImpl_->Finish();
+  return Manifold(pImpl_);
 }
 }  // namespace manifold

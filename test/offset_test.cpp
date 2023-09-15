@@ -33,10 +33,11 @@ TEST(Offset, CubeSphere) {
 
 TEST(Offset, Cube) {
   Manifold cube = Manifold::Cube(glm::vec3(10.0f));
+  cube = cube.Refine(2);
   cube.NaiveOffset(2);
-  // cube += cube.Translate({11.5, 0, 0});
-  // cube += cube.Translate({0, 11.5, 0});
-  // std::cout << cube.OffsetDecomposition(1).size() << std::endl;
+  cube += cube.Translate({11.5, 0, 0});
+  cube += cube.Translate({0, 11.5, 0});
+  std::cout << cube.OffsetDecomposition(1).size() << std::endl;
 }
 
 TEST(Offset, CubeC) {
