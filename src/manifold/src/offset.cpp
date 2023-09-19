@@ -14,6 +14,7 @@
 
 #include <random>
 #include <set>
+#include <unordered_map>
 
 #include "QuickHull.hpp"
 #include "csg_tree.h"
@@ -343,7 +344,7 @@ dvec3 averageNormal(const dvec3& a, const dvec3& b) {
              ab, 1};
   dmat2 invM = inverse(m);
   dvec2 weights = invM * vec2(1, 1);
-  return normalize(a * weights.x + b * weights.y);
+  return a * weights.x + b * weights.y;
 }
 
 dvec3 averageNormal(const dvec3& a, const dvec3& b, const dvec3& c) {
@@ -360,12 +361,11 @@ dvec3 averageNormal(const dvec3& a, const dvec3& b, const dvec3& c) {
              ac, bc, 1};
   dmat3 invM = inverse(m);
   dvec3 weights = invM * vec3(1, 1, 1);
-  return normalize(a * weights.x + b * weights.y + c * weights.z);
+  return a * weights.x + b * weights.y + c * weights.z;
 }
 
 // reference: Offset triangular mesh using multiple normal vectors of a vertex
-void MultiNormalOffset(const Manifold::Impl& impl, float offset) {
-  std::vector<bool> processed(impl.NumVert(), false);
+void MultiNormalOffset(Manifold::Impl& impl, double offset) {
   std::vector<std::vector<int>> vertEdges(impl.NumVert());
   std::vector<std::vector<dvec3>> vertNormals(impl.NumVert());
   std::vector<std::pair<int, int>> edgeNormals(impl.halfedge_.size(), {-1, -1});
@@ -404,9 +404,9 @@ void MultiNormalOffset(const Manifold::Impl& impl, float offset) {
 
     int originalNormalSize = normals.size();
     // handle concave normals
-    std::vector<int> normalMap(normals.size());
-    sequence(ExecutionPolicy::Seq, normalMap.begin(), normalMap.end());
     if (originalNormalSize >= 2) {
+      std::vector<int> normalMap(normals.size());
+      sequence(ExecutionPolicy::Seq, normalMap.begin(), normalMap.end());
       std::vector<std::set<int>> consecutives;
       for (int j = 0; j < originalNormalSize; ++j) consecutives.push_back({j});
 
@@ -415,7 +415,7 @@ void MultiNormalOffset(const Manifold::Impl& impl, float offset) {
         dvec3 b = normals[(j + 1) % originalNormalSize];
         dvec3 out = impl.vertPos_[impl.halfedge_[normalEdge[j]].endVert] -
                     impl.vertPos_[impl.halfedge_[normalEdge[j]].startVert];
-        if (dot(cross(a, b), out) <= 0) {
+        if (dot(cross(a, b), out) <= kCollinear) {
           // concave
           dvec3 newNormal = averageNormal(a, b);
           int additional = -1;
@@ -424,16 +424,17 @@ void MultiNormalOffset(const Manifold::Impl& impl, float offset) {
             dvec3 c1 =
                 normals[(j + originalNormalSize - 1) % originalNormalSize];
             Halfedge e =
-                impl.halfedge_[normalEdge[(j + 2) % originalNormalSize]];
+                impl.halfedge_[normalEdge[(j + 1) % originalNormalSize]];
             Halfedge e1 =
                 impl.halfedge_[normalEdge[(j + originalNormalSize - 1) %
                                           originalNormalSize]];
             out = impl.vertPos_[e.endVert] - impl.vertPos_[e.startVert];
-            dvec3 out1 = impl.vertPos_[e.endVert] - impl.vertPos_[e.startVert];
-            if (dot(cross(b, c), out) <= 0) {
+            dvec3 out1 =
+                impl.vertPos_[e1.endVert] - impl.vertPos_[e1.startVert];
+            if (dot(cross(b, c), out) <= kCollinear) {
               newNormal = averageNormal(a, b, c);
               additional = (j + 2) % originalNormalSize;
-            } else if (dot(cross(c1, a), out1) <= 0) {
+            } else if (dot(cross(c1, a), out1) <= kCollinear) {
               newNormal = averageNormal(c1, a, b);
               additional = (j + originalNormalSize - 1) % originalNormalSize;
             }
@@ -448,21 +449,26 @@ void MultiNormalOffset(const Manifold::Impl& impl, float offset) {
                 return std::find(i.begin(), i.end(),
                                  (j + 1) % originalNormalSize) != i.end();
               });
-          auto iter2 = std::find_if(
-              consecutives.begin(), consecutives.end(), [&](auto i) {
-                return std::find(i.begin(), i.end(), additional) != i.end();
-              });
-          if (iter2 != consecutives.end()) {
-            ASSERT(iter != consecutives.end(), logicErr, "cannot find set");
-            ASSERT(iter1 != consecutives.end(), logicErr, "cannot find set");
+          ASSERT(iter != consecutives.end(), logicErr, "cannot find set");
+          ASSERT(iter1 != consecutives.end(), logicErr, "cannot find set");
+          if (additional == -1) {
+            iter->insert(iter1->begin(), iter1->end());
+            int a = std::distance(consecutives.begin(), iter);
+            int b = std::distance(consecutives.begin(), iter1);
+            if (a != b) consecutives.erase(consecutives.begin() + b);
+          } else {
+            auto iter2 = std::find_if(
+                consecutives.begin(), consecutives.end(), [&](auto i) {
+                  return std::find(i.begin(), i.end(), additional) != i.end();
+                });
+            ASSERT(iter2 != consecutives.end(), logicErr, "cannot find set");
             iter->insert(iter1->begin(), iter1->end());
             iter->insert(iter2->begin(), iter2->end());
             int a = std::distance(consecutives.begin(), iter);
             int b = std::distance(consecutives.begin(), iter1);
             int c = std::distance(consecutives.begin(), iter2);
             if (b > c) std::swap(b, c);
-            if (c != consecutives.size() && a != c)
-              consecutives.erase(consecutives.begin() + c);
+            if (a != c) consecutives.erase(consecutives.begin() + c);
             if (b != c && a != b) consecutives.erase(consecutives.begin() + b);
           }
         }
@@ -471,28 +477,24 @@ void MultiNormalOffset(const Manifold::Impl& impl, float offset) {
       for (const auto& r : consecutives) {
         if (r.size() > 1) {
           dvec3 sum(0);
-          for (int index : r) sum += normalMap[index];
+          for (int index : r) sum += normals[normalMap[index]];
           sum = normalize(sum);
           int idx = addNormal(sum);
           for (int index : r) normalMap[index] = idx;
         }
       }
-    }
-
-    {
       // remove unused normals
       std::vector<int> toRemove(normals.size());
       sequence(ExecutionPolicy::Seq, toRemove.begin(), toRemove.end());
 
-      for (int j = 0; j < originalNormalSize; ++j) toRemove[normalMap[j]] = -1;
+      for (int j = 0; j < normalMap.size(); ++j) toRemove[normalMap[j]] = -1;
 
       std::sort(toRemove.begin(), toRemove.end());
       toRemove.erase(toRemove.begin(),
                      std::upper_bound(toRemove.begin(), toRemove.end(), -1));
       // remove from the back, so the indices are unchanged
-      for (auto iter = toRemove.rbegin(); iter != toRemove.rend(); ++iter) {
-        normals.erase(normals.begin() + *iter);
-      }
+      for (int j = toRemove.size() - 1; j >= 0; --j)
+        normals.erase(normals.begin() + toRemove[j]);
       // remap indices
       for (int j = 0; j < originalNormalSize; ++j) {
         int oldIndex = normalMap[j];
@@ -542,8 +544,12 @@ void MultiNormalOffset(const Manifold::Impl& impl, float offset) {
       int s = normalMap.size();
 
       for (std::pair<int, int>& pair : edgeNormalsLocal) {
-        pair.first = normalMap[pair.first];
-        pair.second = normalMap[pair.second];
+        pair.first = std::distance(
+            normalMap.begin(),
+            std::find(normalMap.begin(), normalMap.end(), pair.first));
+        pair.second = std::distance(
+            normalMap.begin(),
+            std::find(normalMap.begin(), normalMap.end(), pair.second));
       }
 #if MANIFOLD_DEBUG
       // check normal projection forms a convex polygon
@@ -558,26 +564,155 @@ void MultiNormalOffset(const Manifold::Impl& impl, float offset) {
     }
 
     int lastSecond = -1;
-    int s = normalMap.size();
+    int s = normals.size();
     for (int j = 0; j < edges.size(); ++j) {
       std::pair<int, int>& pair = edgeNormalsLocal[j];
       if (pair.second == lastSecond) std::swap(pair.first, pair.second);
       ASSERT(lastSecond == -1 || lastSecond == pair.first ||
                  (lastSecond + 1) % s == pair.first,
              logicErr, "expects monotone normal angle");
+      // somehow some unused normal is not being removed...
       ASSERT(pair.first == pair.second || (pair.first + 1) % s == pair.second,
              logicErr, "expects monotone normal angle");
       lastSecond = pair.second;
     }
     vertEdges[startVert] = edges;
     vertNormals[startVert] = normals;
-    for (int j = 0; j < edges.size(); ++j) {
+    for (int j = 0; j < edges.size(); ++j)
       edgeNormals[edges[j]] = edgeNormalsLocal[j];
-    }
   };
   for_each(ExecutionPolicy::Seq, countAt(0), countAt(impl.halfedge_.size()),
            fn);
-  // handle vertex splitting...
+  // preallocate vertices and triangles
+  std::vector<int> newVertsBefore(impl.NumVert() + 1, 0);
+  std::vector<int> newTrisBefore(impl.NumVert() + 1, 0);
+  for_each(autoPolicy(impl.NumVert()), countAt(0), countAt(impl.NumVert()),
+           [&](int i) {
+             newVertsBefore[i] = vertNormals[i].size() - 1;
+             newTrisBefore[i] =
+                 vertNormals[i].size() >= 3 ? vertNormals[i].size() - 2 : 0;
+           });
+  exclusive_scan(autoPolicy(impl.NumVert()), newVertsBefore.begin(),
+                 newVertsBefore.end(), newVertsBefore.begin(), 0);
+  exclusive_scan(autoPolicy(impl.NumVert()), newTrisBefore.begin(),
+                 newTrisBefore.end(), newTrisBefore.begin(), 0);
+  int oldVertNum = impl.NumVert();
+  int oldHalfedgeSize = impl.halfedge_.size();
+  impl.vertPos_.resize(oldVertNum + newVertsBefore.back());
+  impl.vertNormal_.resize(oldVertNum + newVertsBefore.back());
+  impl.halfedge_.resize(oldHalfedgeSize + newTrisBefore.back() * 3);
+  for (int i = 0; i < oldVertNum; ++i) {
+    dvec3 oldPos = impl.vertPos_[i];
+    impl.vertNormal_[i] = vertNormals[i].front();
+    impl.vertPos_[i] = oldPos + vertNormals[i].front() * offset;
+    int base = oldVertNum + newVertsBefore[i];
+    for (int j = 1; j < vertNormals[i].size(); ++j) {
+      impl.vertNormal_[base + j - 1] = vertNormals[i][j];
+      impl.vertPos_[base + j - 1] = oldPos + vertNormals[i][j] * offset;
+    }
+    int halfedgeBase = oldHalfedgeSize + 3 * newTrisBefore[i];
+    // triangles: 1 0 i; 2 1 i; 3 2 i; ...
+    for (int j = 0; j < static_cast<int>(vertNormals[i].size()) - 2; ++j) {
+      impl.halfedge_[halfedgeBase + j * 3] = {j + 1 + base, j + base, -1,
+                                              halfedgeBase / 3 + j};
+      impl.halfedge_[halfedgeBase + j * 3 + 1] = {j + base, i, -1,
+                                                  halfedgeBase / 3 + j};
+      impl.halfedge_[halfedgeBase + j * 3 + 2] = {i, j + 1 + base, -1,
+                                                  halfedgeBase / 3 + j};
+    }
+    // fix matching halfedges
+    for (int j = 0; j < static_cast<int>(vertNormals[i].size()) - 3; ++j) {
+      impl.halfedge_[halfedgeBase + j * 3 + 2].pairedHalfedge =
+          halfedgeBase + j * 3 + 4;
+      impl.halfedge_[halfedgeBase + j * 3 + 4].pairedHalfedge =
+          halfedgeBase + j * 3 + 2;
+    }
+  }
+  // only for special case in which one vert is split into 2
+  std::unordered_map<int, int> vertPairHalfedge;
+  auto normalIdToVertId = [&](int v, int idx) {
+    if (idx == 0) return v;
+    return oldVertNum + newVertsBefore[v] + idx - 1;
+  };
+  auto pairHalfedge = [&](int idx, int oldvert) {
+    if (vertNormals[oldvert].size() == 2) {
+      auto iter = vertPairHalfedge.find(oldvert);
+      if (iter == vertPairHalfedge.end()) {
+        vertPairHalfedge[oldvert] = idx;
+      } else {
+        int idx2 = iter->second;
+        ASSERT(
+            impl.halfedge_[idx].startVert == impl.halfedge_[idx2].endVert &&
+                impl.halfedge_[idx].endVert == impl.halfedge_[idx2].startVert,
+            logicErr, "halfedge does not match");
+        impl.halfedge_[idx].pairedHalfedge = idx2;
+        impl.halfedge_[idx2].pairedHalfedge = idx;
+      }
+    } else if (impl.halfedge_[idx].endVert < oldVertNum) {
+      int paired = (vertNormals[oldvert].size() - 2) * 3 - 1 +
+                   newTrisBefore[oldvert] * 3 + oldHalfedgeSize;
+      ASSERT(
+          impl.halfedge_[idx].startVert == impl.halfedge_[paired].endVert &&
+              impl.halfedge_[idx].endVert == impl.halfedge_[paired].startVert,
+          logicErr, "halfedge does not match");
+      impl.halfedge_[paired].pairedHalfedge = idx;
+      impl.halfedge_[idx].pairedHalfedge = paired;
+    } else {
+      int edge =
+          impl.halfedge_[idx].endVert - newVertsBefore[oldvert] - oldVertNum;
+      ASSERT(edge >= 0, logicErr, "should be >=0 due to CCW");
+      int paired = (edge == 0 ? 1 : ((edge - 1) * 3)) +
+                   newTrisBefore[oldvert] * 3 + oldHalfedgeSize;
+      ASSERT(
+          impl.halfedge_[idx].startVert == impl.halfedge_[paired].endVert &&
+              impl.halfedge_[idx].endVert == impl.halfedge_[paired].startVert,
+          logicErr, "halfedge does not match");
+      impl.halfedge_[paired].pairedHalfedge = idx;
+      impl.halfedge_[idx].pairedHalfedge = paired;
+    }
+  };
+  for (int i = 0; i < oldHalfedgeSize; ++i) {
+    Halfedge& he = impl.halfedge_[i];
+    int oldStart = he.startVert;
+    int oldEnd = he.endVert;
+    if (!he.IsForward() || oldStart >= oldVertNum || oldEnd >= oldVertNum)
+      continue;
+    Halfedge& eh = impl.halfedge_[he.pairedHalfedge];
+    int ehIdx = he.pairedHalfedge;
+    int newStart1 = normalIdToVertId(oldStart, edgeNormals[i].first);
+    int newStart2 = normalIdToVertId(oldStart, edgeNormals[i].second);
+    int newEnd1 =
+        normalIdToVertId(oldEnd, edgeNormals[he.pairedHalfedge].first);
+    int newEnd2 =
+        normalIdToVertId(oldEnd, edgeNormals[he.pairedHalfedge].second);
+    he.startVert = newStart1;
+    he.endVert = newEnd2;
+    eh.startVert = newEnd1;
+    eh.endVert = newStart2;
+    int diagonal = he.pairedHalfedge;
+    // note that he and eh are invalidated after push_back
+    if (newStart1 != newStart2) {
+      int tri = impl.halfedge_.size() / 3;
+      impl.halfedge_.push_back({newStart2, newEnd1, ehIdx, tri});
+      impl.halfedge_.push_back({newEnd1, newStart1, -1, tri});
+      impl.halfedge_.push_back({newStart1, newStart2, -1, tri});
+      pairHalfedge(impl.halfedge_.size() - 1, oldStart);
+      impl.halfedge_[ehIdx].pairedHalfedge = impl.halfedge_.size() - 3;
+      diagonal = impl.halfedge_.size() - 2;
+    }
+    if (newEnd1 == newEnd2) {
+      impl.halfedge_[i].pairedHalfedge = diagonal;
+      impl.halfedge_[diagonal].pairedHalfedge = i;
+    } else {
+      int tri = impl.halfedge_.size() / 3;
+      impl.halfedge_.push_back({newStart1, newEnd1, diagonal, tri});
+      impl.halfedge_.push_back({newEnd1, newEnd2, -1, tri});
+      impl.halfedge_.push_back({newEnd2, newStart1, i, tri});
+      impl.halfedge_[diagonal].pairedHalfedge = impl.halfedge_.size() - 3;
+      impl.halfedge_[i].pairedHalfedge = impl.halfedge_.size() - 1;
+      pairHalfedge(impl.halfedge_.size() - 2, oldEnd);
+    }
+  }
 }
 
 };  // namespace
@@ -672,7 +807,7 @@ Manifold Manifold::NaiveOffset(float offset) const {
   auto pImpl_ = std::make_shared<Manifold::Impl>();
   *pImpl_ = *GetCsgLeafNode().GetImpl();
   MultiNormalOffset(*pImpl_, offset);
-  pImpl_->Finish();
+  // pImpl_->Finish();
   return Manifold(pImpl_);
 }
 }  // namespace manifold
