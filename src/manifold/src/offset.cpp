@@ -481,10 +481,18 @@ void MultiNormalOffset(Manifold::Impl& impl, double offset) {
       for (auto& r : consecutives) {
         if (r.size() > 1) {
           dvec3 sum(0);
-          std::vector<int> rr(r.begin(), r.end());
-          rr.erase(rr.end() - 1);
-          if (rr.size() > 1) rr.erase(rr.begin());
-          for (int index : r) normalMap[index] = normalMap[rr.front()];
+          double factor = 0;
+          int count = 0;
+          for (int index : r) {
+            if (normals[normalMap[index]].second < 1 + kTolerance) continue;
+            count++;
+            sum += normals[normalMap[index]].first;
+            factor += normals[normalMap[index]].second;
+          }
+          sum = normalize(sum);
+          factor /= count;
+          int idx = addNormal(sum * factor);
+          for (int index : r) normalMap[index] = idx;
         }
       }
       // remove unused normals
