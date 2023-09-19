@@ -367,17 +367,20 @@ dvec3 averageNormal(const dvec3& a, const dvec3& b, const dvec3& c) {
 // reference: Offset triangular mesh using multiple normal vectors of a vertex
 void MultiNormalOffset(Manifold::Impl& impl, double offset) {
   std::vector<std::vector<int>> vertEdges(impl.NumVert());
-  std::vector<std::vector<dvec3>> vertNormals(impl.NumVert());
+  std::vector<std::vector<std::pair<dvec3, double>>> vertNormals(
+      impl.NumVert());
   std::vector<std::pair<int, int>> edgeNormals(impl.halfedge_.size(), {-1, -1});
 
   auto fn = [&](int i) {
     int startVert = impl.halfedge_[i].startVert;
     std::vector<int> edges;
-    std::vector<dvec3> normals;
-    auto addNormal = [&](const dvec3 normal) {
+    std::vector<std::pair<dvec3, double>> normals;
+    auto addNormal = [&](dvec3 normal) {
+      double factor = length(normal);
+      normal = normalize(normal);
       for (int j = 0; j < normals.size(); ++j)
-        if (dot(normal, normals[j]) >= 1 - kCollinear) return j;
-      normals.push_back(normal);
+        if (dot(normal, normals[j].first) >= 1 - kCollinear) return j;
+      normals.push_back({normal, factor});
       return static_cast<int>(normals.size() - 1);
     };
     // entry[i] is the edge where the two neighboring faces have normals
@@ -411,8 +414,8 @@ void MultiNormalOffset(Manifold::Impl& impl, double offset) {
       for (int j = 0; j < originalNormalSize; ++j) consecutives.push_back({j});
 
       for (int j = 0; j < originalNormalSize; ++j) {
-        dvec3 a = normals[j];
-        dvec3 b = normals[(j + 1) % originalNormalSize];
+        dvec3 a = normals[j].first;
+        dvec3 b = normals[(j + 1) % originalNormalSize].first;
         dvec3 out = impl.vertPos_[impl.halfedge_[normalEdge[j]].endVert] -
                     impl.vertPos_[impl.halfedge_[normalEdge[j]].startVert];
         if (dot(cross(a, b), out) <= kCollinear) {
@@ -420,9 +423,10 @@ void MultiNormalOffset(Manifold::Impl& impl, double offset) {
           dvec3 newNormal = averageNormal(a, b);
           int additional = -1;
           if (originalNormalSize >= 3) {
-            dvec3 c = normals[(j + 2) % originalNormalSize];
+            dvec3 c = normals[(j + 2) % originalNormalSize].first;
             dvec3 c1 =
-                normals[(j + originalNormalSize - 1) % originalNormalSize];
+                normals[(j + originalNormalSize - 1) % originalNormalSize]
+                    .first;
             Halfedge e =
                 impl.halfedge_[normalEdge[(j + 1) % originalNormalSize]];
             Halfedge e1 =
@@ -474,33 +478,21 @@ void MultiNormalOffset(Manifold::Impl& impl, double offset) {
         }
       }
       // note that this just approximates the position
-      for (const auto& r : consecutives) {
+      for (auto& r : consecutives) {
         if (r.size() > 1) {
           dvec3 sum(0);
-          for (int index : r) sum += normals[normalMap[index]];
-          sum = normalize(sum);
-          int idx = addNormal(sum);
-          for (int index : r) normalMap[index] = idx;
+          std::vector<int> rr(r.begin(), r.end());
+          rr.erase(rr.end() - 1);
+          if (rr.size() > 1) rr.erase(rr.begin());
+          for (int index : r) normalMap[index] = normalMap[rr.front()];
         }
       }
       // remove unused normals
-      std::vector<int> toRemove(normals.size());
-      sequence(ExecutionPolicy::Seq, toRemove.begin(), toRemove.end());
-
-      for (int j = 0; j < normalMap.size(); ++j) toRemove[normalMap[j]] = -1;
-
-      std::sort(toRemove.begin(), toRemove.end());
-      toRemove.erase(toRemove.begin(),
-                     std::upper_bound(toRemove.begin(), toRemove.end(), -1));
-      // remove from the back, so the indices are unchanged
-      for (int j = toRemove.size() - 1; j >= 0; --j)
-        normals.erase(normals.begin() + toRemove[j]);
-      // remap indices
-      for (int j = 0; j < originalNormalSize; ++j) {
-        int oldIndex = normalMap[j];
-        int count = std::count_if(toRemove.begin(), toRemove.end(),
-                                  [oldIndex](int x) { return x < oldIndex; });
-        normalMap[j] -= count;
+      std::vector<std::pair<dvec3, double>> oldnormals;
+      std::swap(normals, oldnormals);
+      for (int& index : normalMap) {
+        dvec3 v = oldnormals[index].first * oldnormals[index].second;
+        index = addNormal(v);
       }
       for (std::pair<int, int>& edge : edgeNormalsLocal) {
         edge.first = normalMap[edge.first];
@@ -508,9 +500,7 @@ void MultiNormalOffset(Manifold::Impl& impl, double offset) {
       }
     }
 
-    dvec3 vertNormal(0);
-    for (auto& v : normals) vertNormal += v;
-    vertNormal = normalize(vertNormal);
+    dvec3 vertNormal = impl.vertNormal_[startVert];
 
     if (normals.size() >= 3) {
       // project them onto a plane with normal = vertex normal,
@@ -520,26 +510,29 @@ void MultiNormalOffset(Manifold::Impl& impl, double offset) {
       float minCos = 2.0;
       int maxIndex = -1;
       for (int j = 0; j < normals.size(); ++j) {
-        float angle = abs(dot(normals[j], vertNormal));
+        float angle = abs(dot(normals[j].first, vertNormal));
         if (angle < minCos) minCos = angle;
         maxIndex = j;
       }
-      dvec3 xaxis = normalize(normals[maxIndex] -
-                              vertNormal * dot(normals[maxIndex], vertNormal));
+      dvec3 xaxis =
+          normalize(normals[maxIndex].first -
+                    vertNormal * dot(normals[maxIndex].first, vertNormal));
       dvec3 yaxis = normalize(cross(vertNormal, xaxis));
       Vec<double> angles;
       Vec<int> normalMap(normals.size());
       sequence(ExecutionPolicy::Seq, normalMap.begin(), normalMap.end());
-      for (const dvec3& normal : normals) {
-        double angle = atan2(dot(normal, yaxis), dot(normal, xaxis));
+      for (const auto& normal : normals) {
+        double angle =
+            atan2(dot(normal.first, yaxis), dot(normal.first, xaxis));
         angles.push_back(angle);
       }
-      std::stable_sort(zip(angles.begin(), normals.begin(), normalMap.begin()),
-                       zip(angles.end(), normals.end(), normalMap.end()),
-                       [](const thrust::tuple<double, dvec3, int>& a,
-                          const thrust::tuple<double, dvec3, int>& b) {
-                         return thrust::get<0>(a) > thrust::get<0>(b);
-                       });
+      std::stable_sort(
+          zip(angles.begin(), normals.begin(), normalMap.begin()),
+          zip(angles.end(), normals.end(), normalMap.end()),
+          [](const thrust::tuple<double, std::pair<dvec3, double>, int>& a,
+             const thrust::tuple<double, std::pair<dvec3, double>, int>& b) {
+            return thrust::get<0>(a) > thrust::get<0>(b);
+          });
       int lastSecond = -1;
       int s = normalMap.size();
 
@@ -554,9 +547,9 @@ void MultiNormalOffset(Manifold::Impl& impl, double offset) {
 #if MANIFOLD_DEBUG
       // check normal projection forms a convex polygon
       for (int j = 0; j < normals.size(); ++j) {
-        dvec3 a = normals[(j + 1) % normals.size()] - normals[j];
-        dvec3 b = normals[(j + 2) % normals.size()] -
-                  normals[(j + 1) % normals.size()];
+        dvec3 a = normals[(j + 1) % normals.size()].first - normals[j].first;
+        dvec3 b = normals[(j + 2) % normals.size()].first -
+                  normals[(j + 1) % normals.size()].first;
         ASSERT(dot(cross(a, b), vertNormal) <= 0, logicErr,
                "expects convex projection");
       }
@@ -603,12 +596,14 @@ void MultiNormalOffset(Manifold::Impl& impl, double offset) {
   impl.halfedge_.resize(oldHalfedgeSize + newTrisBefore.back() * 3);
   for (int i = 0; i < oldVertNum; ++i) {
     dvec3 oldPos = impl.vertPos_[i];
-    impl.vertNormal_[i] = vertNormals[i].front();
-    impl.vertPos_[i] = oldPos + vertNormals[i].front() * offset;
+    impl.vertNormal_[i] = vertNormals[i].front().first;
+    impl.vertPos_[i] = oldPos + vertNormals[i].front().first *
+                                    vertNormals[i].front().second * offset;
     int base = oldVertNum + newVertsBefore[i];
     for (int j = 1; j < vertNormals[i].size(); ++j) {
-      impl.vertNormal_[base + j - 1] = vertNormals[i][j];
-      impl.vertPos_[base + j - 1] = oldPos + vertNormals[i][j] * offset;
+      impl.vertNormal_[base + j - 1] = vertNormals[i][j].first;
+      impl.vertPos_[base + j - 1] =
+          oldPos + vertNormals[i][j].first * vertNormals[i][j].second * offset;
     }
     int halfedgeBase = oldHalfedgeSize + 3 * newTrisBefore[i];
     // triangles: 1 0 i; 2 1 i; 3 2 i; ...
