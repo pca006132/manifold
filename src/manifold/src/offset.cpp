@@ -716,6 +716,11 @@ void MultiNormalOffset(Manifold::Impl& impl, double offset) {
       pairHalfedge(impl.halfedge_.size() - 2, oldEnd);
     }
   }
+
+  // stuff from subdivide
+  impl.faceNormal_.resize(0);
+  impl.meshRelation_.originalID = impl.ReserveIDs(1);
+  impl.InitializeOriginal();
 }
 
 };  // namespace
@@ -807,10 +812,16 @@ std::vector<Manifold> Manifold::OffsetDecomposition(float offset) const {
 }
 
 Manifold Manifold::NaiveOffset(float offset) const {
+  if (IsEmpty()) return Manifold();
   auto pImpl_ = std::make_shared<Manifold::Impl>();
   *pImpl_ = *GetCsgLeafNode().GetImpl();
   MultiNormalOffset(*pImpl_, offset);
-  // pImpl_->Finish();
+  ASSERT(pImpl_->Is2Manifold(), logicErr, "should preserve manifoldness");
+  ASSERT(!pImpl_->IsEmpty(), logicErr, "should not be empty");
+  pImpl_->CalculateNormals();
+  pImpl_->SplitPinchedVerts();
+  pImpl_->SimplifyTopology();
+  pImpl_->Finish();
   return Manifold(pImpl_);
 }
 }  // namespace manifold
