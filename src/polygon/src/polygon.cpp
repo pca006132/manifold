@@ -172,6 +172,48 @@ void PrintFailure(const std::exception &e, const PolygonsIdx &polys,
 #define PRINT(msg)
 #endif
 
+inline bool intersect(glm::vec2 p0, glm::vec2 p1, glm::vec2 q0, glm::vec2 q1,
+                      float precision) {
+  glm::vec2 r = p1 - p0;
+  glm::vec2 s = q1 - q0;
+  // allow some error in the intersection point
+  float epsilon_r = 2.0 * precision / glm::length(r);
+  float epsilon_s = 2.0 * precision / glm::length(s);
+  float rxs = glm::determinant(glm::mat2(r, s));
+  // in case they are nearly collinear, ignore them...
+  // this is to avoid treating degenerate triangles as intersecting
+  //
+  // note that this does not correspond to a fixed angle,
+  // but seems to work well enough
+  if (rxs < kTolerance && rxs > -kTolerance) {
+    return false;
+  }
+  float u = glm::determinant(glm::mat2(q0 - p0, r)) / rxs;
+  float t = glm::determinant(glm::mat2(q0 - p0, s)) / rxs;
+  // we only care about intersection in the middle of both lines, excluding
+  // their ends
+  if (epsilon_r <= u && u <= (1 - epsilon_r) &&  //
+      epsilon_s <= t && t <= (1 - epsilon_s)) {
+    // there can be cases which r and s are close to collinear,
+    // so even though the lines are not intersecting,
+    // perturbation along r/s is not enough.
+    //
+    // in that case, apply perturbation perpendicular to r
+    glm::vec2 r_orth = glm::normalize(glm::vec2(-r.y, r.x)) * precision;
+    float u1 = glm::determinant(glm::mat2(q0 - p0 + r_orth, r)) / rxs;
+    float u2 = glm::determinant(glm::mat2(q0 - p0 - r_orth, r)) / rxs;
+    float t1 = glm::determinant(glm::mat2(q0 - p0 + r_orth, s)) / rxs;
+    float t2 = glm::determinant(glm::mat2(q0 - p0 - r_orth, s)) / rxs;
+    return 0 <= u1 && u1 <= 1 &&  //
+           0 <= t1 && t1 <= 1 &&  //
+           0 <= u2 && u2 <= 1 &&  //
+           0 <= t2 && t2 <= 1;
+    return true;
+  } else {
+    return false;
+  }
+}
+
 /**
  * Ear-clipping triangulator based on David Eberly's approach from Geometric
  * Tools, but adjusted to handle epsilon-valid polygons, and including a
@@ -617,6 +659,16 @@ class EarClip {
     }
   }
 
+  bool validBridge(glm::vec2 start, glm::vec2 end, VertItr polyStart) const {
+    VertItr vert = polyStart->right;
+    while (vert != polyStart) {
+      if (intersect(start, end, vert->pos, vert->right->pos, precision_))
+        return false;
+      vert = vert->right;
+    }
+    return true;
+  }
+
   // This converts the initial guess for the keyhole location into the final one
   // and returns it. It does so by finding any reflex verts inside the triangle
   // containing the guessed connection and the initial horizontal line, and
@@ -631,6 +683,8 @@ class EarClip {
     const glm::vec2 left = start->pos - guess->pos;
     const glm::vec2 right = intersection - guess->pos;
     float minD2 = glm::dot(left, left);
+    std::vector<VertItr> bests = {best};
+    std::set<int> invalidIds;
     while (vert != guess) {
       const glm::vec2 offset = vert->pos - guess->pos;
       const glm::vec2 diff = vert->pos - start->pos;
@@ -639,10 +693,47 @@ class EarClip {
           above * glm::determinant(glm::mat2(left, offset)) > -precision_ &&
           above * glm::determinant(glm::mat2(offset, right)) > -precision_ &&
           !vert->IsConvex(precision_)) {
+        if (invalidIds.find(vert->mesh_idx) != invalidIds.end() ||
+            !validBridge(start->pos, vert->pos, guess)) {
+#ifdef MANIFOLD_DEBUG
+          if (params.verbose) {
+            std::cout << "skipped " << start->mesh_idx << " to "
+                      << best->mesh_idx << " because it is an invalid bridge"
+                      << std::endl;
+          }
+#endif
+          // cache the invalid ids so we don't have to do expensive validBridge
+          // check next time
+          invalidIds.insert(vert->mesh_idx);
+          vert = vert->right;
+          continue;
+        }
         minD2 = d2;
+        if (best->mesh_idx != vert->mesh_idx) {
+          bests.clear();
+        }
         best = vert;
       }
+      if (best->mesh_idx == vert->mesh_idx) bests.push_back(vert);
       vert = vert->right;
+    }
+    if (bests.size() > 1) {
+      // make sure that incoming edges are in CW order
+      glm::vec2 base = glm::normalize(start->pos - best->pos);
+      float baseAngle = std::atan2(base.x, base.y);
+      float maxAngle = -std::numeric_limits<float>::infinity();
+      for (VertItr itr : bests) {
+        glm::vec2 v = glm::normalize(itr->left->pos - best->pos);
+        float angle = std::atan2(v.x, v.y) - baseAngle;
+        // in the special case in which they are collinear
+        // we can assume that we should place after it...
+        while (angle <= 0) angle += 2 * glm::pi<float>();
+        while (angle > 2 * glm::pi<float>()) angle -= 2 * glm::pi<float>();
+        if (angle > maxAngle) {
+          maxAngle = angle;
+          best = itr;
+        }
+      }
     }
 #ifdef MANIFOLD_DEBUG
     if (params.verbose) {
