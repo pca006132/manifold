@@ -664,7 +664,7 @@ TEST(Boolean, TreeTransforms) {
 }
 
 TEST(Boolean, Sweep) {
-  PolygonParams().processOverlaps = true;
+  // PolygonParams().processOverlaps = true;
 
   // generate the minimum equivalent positive angle
   auto minPosAngle = [](float angle) {

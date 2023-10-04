@@ -18,6 +18,7 @@
 #include <atomic>
 #include <map>
 #include <numeric>
+#include <chrono>
 
 #include "graph.h"
 #include "hashtable.h"
@@ -310,6 +311,7 @@ struct EdgeBox {
 
 int GetLabels(std::vector<int>& components,
               const Vec<thrust::pair<int, int>>& edges, int numNodes) {
+  auto start = std::chrono::high_resolution_clock::now();
   Graph graph;
   for (int i = 0; i < numNodes; ++i) {
     graph.add_nodes(i);
@@ -320,7 +322,10 @@ int GetLabels(std::vector<int>& components,
     graph.add_edge(edge.first, edge.second);
   }
 
-  return ConnectedComponents(components, graph);
+  auto result = ConnectedComponents(components, graph);
+  auto end = std::chrono::high_resolution_clock::now();
+  std::cout << "GetLabels took " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << "ms\n";
+  return std::move(result);
 }
 
 void DedupePropVerts(manifold::Vec<glm::ivec3>& triProp,
@@ -520,7 +525,10 @@ Manifold::Impl::Impl(const Mesh& mesh, const MeshRelationD& relation,
     return;
   }
 
+  auto start = std::chrono::high_resolution_clock::now();
   SplitPinchedVerts();
+  auto end = std::chrono::high_resolution_clock::now();
+  std::cout << "SplitPinchedVerts took " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << "ms\n";
 
   CalculateNormals();
 
@@ -622,6 +630,7 @@ void Manifold::Impl::CreateFaces(const std::vector<float>& propertyTolerance) {
       propertyTolerance.empty() ? Vec<float>(meshRelation_.numProp, kTolerance)
                                 : propertyTolerance;
 
+  auto start = std::chrono::high_resolution_clock::now();
   Vec<thrust::pair<int, int>> face2face(halfedge_.size(), {-1, -1});
   Vec<thrust::pair<int, int>> vert2vert(halfedge_.size(), {-1, -1});
   Vec<float> triArea(NumTri());
@@ -662,6 +671,8 @@ void Manifold::Impl::CreateFaces(const std::vector<float>& propertyTolerance) {
       triRef[tri].tri = referenceTri;
     }
   }
+  auto end = std::chrono::high_resolution_clock::now();
+  std::cout << "CreateFaces took " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << "ms\n";
 }
 
 /**

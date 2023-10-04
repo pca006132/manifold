@@ -729,6 +729,13 @@ class EarClip {
         // we can assume that we should place after it...
         while (angle <= 0) angle += 2 * glm::pi<float>();
         while (angle > 2 * glm::pi<float>()) angle -= 2 * glm::pi<float>();
+#ifdef MANIFOLD_DEBUG
+        if (params.verbose) {
+          std::cout << "angle " << itr->mesh_idx << " to " << best->mesh_idx
+                    << " = " << angle << std::endl;
+        }
+#endif
+
         if (angle > maxAngle) {
           maxAngle = angle;
           best = itr;
@@ -819,8 +826,8 @@ class EarClip {
       ClipEar(v);
       --numTri;
 
-      ProcessEar(v->left);
-      ProcessEar(v->right);
+      if (v->left != v) ProcessEar(v->left);
+      if (v->right != v) ProcessEar(v->right);
       // This is a backup vert that is used if the queue is empty (geometrically
       // invalid polygon), to ensure manifoldness.
       v = v->right;

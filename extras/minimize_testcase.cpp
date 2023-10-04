@@ -191,7 +191,13 @@ void simplify(Polygons &polys, float precision = -1) {
           msg = e.what();
         }
       } catch (topologyErr &e) {
-        polys.insert(polys.begin() + i, std::move(poly));
+        // polys.insert(polys.begin() + i, std::move(poly));
+        if (msg.size() > 0 && msg.compare(e.what()) != 0) {
+          polys.insert(polys.begin() + i, std::move(poly));
+        } else {
+          removedSomething = true;
+          msg = e.what();
+        }
       }
     }
 
@@ -229,7 +235,13 @@ void simplify(Polygons &polys, float precision = -1) {
             msg = e.what();
           }
         } catch (topologyErr &e) {
-          polys[i].insert(polys[i].begin() + j, removed);
+          // polys[i].insert(polys[i].begin() + j, removed);
+          if (msg.size() > 0 && msg.compare(e.what()) != 0) {
+            polys[i].insert(polys[i].begin() + j, removed);
+          } else {
+            removedSomething = true;
+            msg = e.what();
+          }
         }
       }
     }
@@ -305,7 +317,8 @@ int isValid(const Polygons &polys, float precision = -1) {
 int main(int argc, char **argv) {
   PolygonParams().intermediateChecks = true;
   PolygonParams().processOverlaps = false;
-  PolygonParams().suppressErrors = true;
+  PolygonParams().suppressErrors = false;
+  PolygonParams().verbose = true;
 
   if (argc < 2) {
     std::cerr << "Usage: " << argv[0] << " <input file>" << std::endl;
@@ -378,7 +391,7 @@ int main(int argc, char **argv) {
 
   isValid(polys, precision);
 
-  simplify(polys, precision);
+  // simplify(polys, precision);
 
   std::cout << "------------" << std::endl;
   std::cout << "Final polygon:" << std::endl;

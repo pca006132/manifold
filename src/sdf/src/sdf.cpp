@@ -125,7 +125,7 @@ struct GridVert {
 struct ComputeVerts {
   VecView<glm::vec3> vertPos;
   VecView<int> vertIndex;
-  HashTableD<GridVert, identity> gridVerts;
+  HashTableD<GridVert> gridVerts;
   const std::function<float(glm::vec3)> sdf;
   const glm::vec3 origin;
   const glm::ivec3 gridSize;
@@ -150,19 +150,20 @@ struct ComputeVerts {
     return d;
   }
 
-  inline void operator()(Uint64 mortonCode) {
-    if (gridVerts.Full()) return;
-
+  inline int operator()(Uint64 mortonCode) {
     const glm::ivec4 gridIndex = DecodeMorton(mortonCode);
 
-    if (glm::any(glm::greaterThan(glm::ivec3(gridIndex), gridSize))) return;
+    if (glm::any(glm::greaterThan(glm::ivec3(gridIndex), gridSize))) return 0;
 
     const glm::vec3 position = Position(gridIndex);
 
     GridVert gridVert;
     gridVert.distance = BoundedSDF(gridIndex);
 
-    bool keep = false;
+    glm::vec3 localpos[8];
+    int localposId[8] = {-1};
+    int count = 0;
+
     // These seven edges are uniquely owned by this gridVert; any of them
     // which intersect the surface create a vert.
     for (int i = 0; i < 7; ++i) {
@@ -173,28 +174,40 @@ struct ComputeVerts {
       }
       const float val = BoundedSDF(neighborIndex);
       if ((val > 0) == (gridVert.distance > 0)) continue;
-      keep = true;
-
-      const int idx = AtomicAdd(vertIndex[0], 1);
-      vertPos[idx] =
+      localpos[count] =
           (val * position - gridVert.distance * Position(neighborIndex)) /
           (val - gridVert.distance);
-      gridVert.edgeVerts[i] = idx;
+      localposId[count] = i;
+      count++;
     }
 
-    if (keep) gridVerts.Insert(mortonCode, gridVert);
+    if (count > 0) {
+      const int idx = AtomicAdd(vertIndex[0], count);
+      for (int i = 0; i < count; ++i) {
+        vertPos[idx + i] = localpos[i];
+        gridVert.edgeVerts[localposId[i]] = idx + i;
+      }
+      if (gridVerts.Insert(mortonCode, gridVert) == -1) return -1;
+    }
+    return 0;
   }
 };
 
 struct BuildTris {
   VecView<glm::ivec3> triVerts;
   VecView<int> triIndex;
-  const HashTableD<GridVert, identity> gridVerts;
+  const HashTableD<GridVert> gridVerts;
+  int* count;
+  glm::ivec3* verts;
 
   void CreateTri(const glm::ivec3& tri, const int edges[6]) {
     if (tri[0] < 0) return;
-    int idx = AtomicAdd(triIndex[0], 1);
-    triVerts[idx] = {edges[tri[0]], edges[tri[1]], edges[tri[2]]};
+    verts[(*count)++] = {edges[tri[0]], edges[tri[1]], edges[tri[2]]};
+    if (*count == 128) {
+      int idx = AtomicAdd(triIndex[0], *count);
+      std::copy(verts, verts + *count, triVerts.begin() + idx);
+      *count = 0;
+    }
   }
 
   void CreateTris(const glm::ivec4& tet, const int edges[6]) {
@@ -319,14 +332,20 @@ Mesh LevelSet(std::function<float(glm::vec3)> sdf, Box bounds, float edgeLength,
 
   int tableSize = glm::min(
       2 * maxMorton, static_cast<Uint64>(10 * glm::pow(maxMorton, 0.667)));
-  HashTable<GridVert, identity> gridVerts(tableSize);
+  HashTable<GridVert> gridVerts(tableSize);
   Vec<glm::vec3> vertPos(gridVerts.Size() * 7);
 
   while (1) {
     Vec<int> index(1, 0);
-    for_each_n(pol, countAt(0), maxMorton + 1,
-               ComputeVerts({vertPos, index, gridVerts.D(), sdf, bounds.min,
-                             gridSize + 1, spacing, level}));
+    auto kernel = ComputeVerts({vertPos, index, gridVerts.D(), sdf, bounds.min,
+                                gridSize + 1, spacing, level});
+    tbb::parallel_for(tbb::blocked_range<Uint64>(0, maxMorton + 1, 1024),
+                      [&](const tbb::blocked_range<Uint64>& r) {
+                        if (gridVerts.Full()) return;
+                        for (Uint64 i = r.begin(); i != r.end(); ++i) {
+                          if (kernel(i) == -1) break;
+                        }
+                      });
 
     if (gridVerts.Full()) {  // Resize HashTable
       const glm::vec3 lastVert = vertPos[index[0] - 1];
@@ -337,7 +356,7 @@ Mesh LevelSet(std::function<float(glm::vec3)> sdf, Box bounds, float edgeLength,
         tableSize *= 2;
       else
         tableSize *= ratio;
-      gridVerts = HashTable<GridVert, identity>(tableSize);
+      gridVerts = HashTable<GridVert>(tableSize);
       vertPos = Vec<glm::vec3>(gridVerts.Size() * 7);
     } else {  // Success
       vertPos.resize(index[0]);
@@ -348,8 +367,19 @@ Mesh LevelSet(std::function<float(glm::vec3)> sdf, Box bounds, float edgeLength,
   Vec<glm::ivec3> triVerts(gridVerts.Entries() * 12);  // worst case
 
   Vec<int> index(1, 0);
-  for_each_n(pol, countAt(0), gridVerts.Size(),
-             BuildTris({triVerts, index, gridVerts.D()}));
+  tbb::parallel_for(tbb::blocked_range<int>(0, gridVerts.Size(), 1024),
+                    [&](const tbb::blocked_range<int>& r) {
+                      int count = 0;
+                      glm::ivec3 verts[128];
+                      auto kernel = BuildTris(
+                          {triVerts, index, gridVerts.D(), &count, verts});
+                      for (int i = r.begin(); i != r.end(); ++i) kernel(i);
+                      if (count > 0) {
+                        int idx = AtomicAdd(index[0], count);
+                        std::copy(verts, verts + count, triVerts.begin() + idx);
+                      }
+                    });
+
   triVerts.resize(index[0]);
 
   out.vertPos.insert(out.vertPos.end(), vertPos.begin(), vertPos.end());

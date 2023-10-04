@@ -61,12 +61,22 @@ class VecView {
   operator VecView<const T>() const { return {ptr_, size_}; }
 
   inline const T &operator[](int i) const {
-    if (i < 0 || i >= size_) throw std::out_of_range("Vec out of range");
+    if (i < 0 || i >= size_) {
+      printf("i = %d, n = %d\n", i, size_);
+      // std::cout.flush();
+      __builtin_trap();
+      throw std::out_of_range("Vec out of range");
+    }
     return ptr_[i];
   }
 
   inline T &operator[](int i) {
-    if (i < 0 || i >= size_) throw std::out_of_range("Vec out of range");
+    if (i < 0 || i >= size_) {
+      printf("i = %d, n = %d\n", i, size_);
+      // std::cout.flush();
+      __builtin_trap();
+      throw std::out_of_range("Vec out of range");
+    }
     return ptr_[i];
   }
 

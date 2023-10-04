@@ -71,41 +71,43 @@ class HashTableD {
 
   bool Full() const { return AtomicLoad(used_[0]) * 2 > Size(); }
 
-  void Insert(Uint64 key, const V& val) {
-    uint32_t idx = H(key) & (Size() - 1);
+  int Insert(Uint64 key, const V& val) {
+    uint32_t idx = H(key) % (Size() - 1);
+    uint32_t failure = 0;
     while (1) {
-      if (Full()) return;
+      if (++failure > 10 && Full()) return -1;
+      if (failure > 10) failure = 0;
       Uint64& k = keys_[idx];
       const Uint64 found = AtomicCAS(k, kOpen, key);
       if (found == kOpen) {
         AtomicAdd(used_[0], 0x1u);
         values_[idx] = val;
-        return;
+        return 0;
       }
-      if (found == key) return;
-      idx = (idx + step_) & (Size() - 1);
+      if (found == key) return 0;
+      idx = (idx + step_) % (Size() - 1);
     }
   }
 
   V& operator[](Uint64 key) {
-    uint32_t idx = H(key) & (Size() - 1);
+    uint32_t idx = H(key) % (Size() - 1);
     while (1) {
       const Uint64 k = AtomicLoad(keys_[idx]);
       if (k == key || k == kOpen) {
         return values_[idx];
       }
-      idx = (idx + step_) & (Size() - 1);
+      idx = (idx + step_) % (Size() - 1);
     }
   }
 
   const V& operator[](Uint64 key) const {
-    uint32_t idx = H(key) & (Size() - 1);
+    uint32_t idx = H(key) % (Size() - 1);
     while (1) {
       const Uint64 k = AtomicLoad(keys_[idx]);
       if (k == key || k == kOpen) {
         return values_[idx];
       }
-      idx = (idx + step_) & (Size() - 1);
+      idx = (idx + step_) % (Size() - 1);
     }
   }
 
@@ -124,8 +126,8 @@ template <typename V, hash_fun_t H = hash64bit>
 class HashTable {
  public:
   HashTable(uint32_t size, uint32_t step = 1)
-      : keys_{1 << (int)ceil(log2(size)), kOpen},
-        values_{1 << (int)ceil(log2(size)), {}},
+      : keys_{(1 << (int)ceil(log2(size)))-1, kOpen},
+        values_{(1 << (int)ceil(log2(size)))-1, {}},
         table_{keys_, values_, used_, step} {}
 
   HashTableD<V, H> D() { return table_; }

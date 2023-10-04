@@ -47,13 +47,15 @@ namespace manifold {
 Manifold GyroidModule(float size, int n) {
   auto gyroid = [&](float level) {
     const float period = glm::two_pi<float>();
-    return Manifold(LevelSet(Gyroid(), {glm::vec3(-period), glm::vec3(period)},
-                             period / n, level))
-        .Scale(glm::vec3(size / period));
+    return LevelSet(Gyroid(), {glm::vec3(-period), glm::vec3(period)},
+        period / n, level);
+        // .Scale(glm::vec3(size / period));
   };
 
-  Manifold result = (RhombicDodecahedron(size) ^ gyroid(-0.4)) - gyroid(0.4);
-
-  return result.Rotate(-45, 0, 90).Translate({0, 0, size / glm::sqrt(2.0f)});
+  gyroid(0);
+  return Manifold();
+  // Manifold result = (RhombicDodecahedron(size) ^ gyroid(-0.4)) - gyroid(0.4);
+  //
+  // return result.Rotate(-45, 0, 90).Translate({0, 0, size / glm::sqrt(2.0f)});
 }
 }  // namespace manifold
