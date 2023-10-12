@@ -219,6 +219,20 @@ TEST(Boolean, MultiCoplanar) {
   EXPECT_NEAR(prop.surfaceArea, 2.76, 1e-5);
 }
 
+TEST(Boolean, RotateCoplanar) {
+  Manifold a = Manifold::Cube(glm::vec3(8), true).Rotate(30);
+  Manifold b = Manifold::Cube().Rotate(30);
+  Manifold out = a - b;
+  CheckStrictly(out);
+#ifdef MANIFOLD_EXPORT
+  ExportOptions opt;
+  opt.mat.roughness = 1;
+  opt.mat.colorChannels = glm::ivec4(3, 4, 5, -1);
+  if (options.exportModels)
+    ExportMesh("rotate_coplanar.glb", out.GetMeshGL(), opt);
+#endif
+}
+
 TEST(Boolean, FaceUnion) {
   Manifold cubes = Manifold::Cube();
   cubes += cubes.Translate({1, 0, 0});

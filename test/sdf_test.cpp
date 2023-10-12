@@ -33,6 +33,16 @@ struct CubeVoid {
   }
 };
 
+struct GearLike {
+  const float offset;
+  float operator()(glm::vec3 p) const {
+    const float theta = std::atan2(p.y, p.x) * 20;
+    return (-std::sqrt(p.x * p.x + p.y * p.y) + 4 + std::sin(theta) / 2) *
+               (1 + std::cos(p.z) / 2) -
+           offset;
+  }
+};
+
 struct Layers {
   float operator()(glm::vec3 p) const {
     int a = glm::mod(glm::round(2 * p.z), 4.0f);
@@ -114,4 +124,17 @@ TEST(SDF, Resize) {
 
   EXPECT_EQ(layers.Status(), Manifold::Error::NoError);
   EXPECT_EQ(layers.Genus(), -8);
+}
+
+TEST(SDF, GearLike) {
+  const float p2 = glm::pi<float>() * 2;
+  auto gearlike = [=](float offset) {
+    return Manifold(LevelSet(GearLike{offset},
+                             {glm::vec3(-p2), glm::vec3(2 * p2)}, p2 / 60));
+  };
+  Manifold result = (gearlike(-0.1) - gearlike(0.1)).Scale(glm::vec3(20 / p2)) ^
+                    Manifold::Cube({40, 40, 20}, true);
+#ifdef MANIFOLD_EXPORT
+  if (options.exportModels) ExportMesh("gearlike.stl", result.GetMesh(), {});
+#endif
 }

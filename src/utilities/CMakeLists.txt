@@ -44,7 +44,6 @@ if (TRACY_ENABLE)
     )
     FetchContent_MakeAvailable(tracy)
     target_link_libraries(${PROJECT_NAME} INTERFACE TracyClient)
-    target_compile_options(${PROJECT_NAME} INTERFACE -DTRACY_NO_CODE_TRANSFER=1)
 endif()
 
 if(MANIFOLD_PAR STREQUAL "TBB")

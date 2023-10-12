@@ -103,6 +103,34 @@ class VecView {
     return ptr_[size_ - 1];
   }
 
+  VecView<T> view(int offset = 0, int length = -1) {
+    if (length == -1) {
+      length = this->size_ - offset;
+      if (length < 0) throw std::out_of_range("VecView::view out of range");
+    } else if (offset + length > this->size_ || offset < 0) {
+      throw std::out_of_range("VecView::view out of range");
+    } else if (length < 0) {
+      throw std::out_of_range("VecView::view negative length is not allowed");
+    }
+    return VecView<T>(this->ptr_ + offset, length);
+  }
+
+  VecView<const T> cview(int offset = 0, int length = -1) const {
+    if (length == -1) {
+      length = this->size_ - offset;
+      if (length < 0) throw std::out_of_range("VecView::cview out of range");
+    } else if (offset + length > this->size_ || offset < 0) {
+      throw std::out_of_range("VecView::cview out of range");
+    } else if (length < 0) {
+      throw std::out_of_range("VecView::cview negative length is not allowed");
+    }
+    return VecView<const T>(this->ptr_ + offset, length);
+  }
+
+  VecView<const T> view(int offset = 0, int length = -1) const {
+    return cview(offset, length);
+  }
+
   int size() const { return size_; }
 
   bool empty() const { return size_ == 0; }
@@ -281,34 +309,6 @@ class Vec : public VecView<T> {
     }
     this->ptr_ = newBuffer;
     capacity_ = this->size_;
-  }
-
-  VecView<T> view(int offset = 0, int length = -1) {
-    if (length == -1) {
-      length = this->size_ - offset;
-      if (length < 0) throw std::out_of_range("Vec::view out of range");
-    } else if (offset + length > this->size_ || offset < 0) {
-      throw std::out_of_range("Vec::view out of range");
-    } else if (length < 0) {
-      throw std::out_of_range("Vec::view negative length is not allowed");
-    }
-    return VecView<T>(this->ptr_ + offset, length);
-  }
-
-  VecView<const T> cview(int offset = 0, int length = -1) const {
-    if (length == -1) {
-      length = this->size_ - offset;
-      if (length < 0) throw std::out_of_range("Vec::cview out of range");
-    } else if (offset + length > this->size_ || offset < 0) {
-      throw std::out_of_range("Vec::cview out of range");
-    } else if (length < 0) {
-      throw std::out_of_range("Vec::cview negative length is not allowed");
-    }
-    return VecView<const T>(this->ptr_ + offset, length);
-  }
-
-  VecView<const T> view(int offset = 0, int length = -1) const {
-    return cview(offset, length);
   }
 
   T *data() { return this->ptr_; }

@@ -22,6 +22,71 @@ using namespace manifold;
 
 namespace {
 
+constexpr int BTREE_WAYS = 8;
+
+constexpr int BTREE_LUT_COMPUTE(int level) {
+  if (level == 0) return 0;
+  return BTREE_LUT_COMPUTE(level - 1) * BTREE_WAYS + BTREE_WAYS;
+}
+
+constexpr int BTREE_LUT[] = {
+    BTREE_LUT_COMPUTE(0),  BTREE_LUT_COMPUTE(1),  BTREE_LUT_COMPUTE(2),
+    BTREE_LUT_COMPUTE(3),  BTREE_LUT_COMPUTE(4),  BTREE_LUT_COMPUTE(5),
+    BTREE_LUT_COMPUTE(6),  BTREE_LUT_COMPUTE(7),  BTREE_LUT_COMPUTE(8),
+    BTREE_LUT_COMPUTE(9),  BTREE_LUT_COMPUTE(10), //BTREE_LUT_COMPUTE(11),
+    // BTREE_LUT_COMPUTE(12), BTREE_LUT_COMPUTE(13), BTREE_LUT_COMPUTE(14)
+};
+
+void btree_construct_rec(int level, VecView<int64_t> dest,
+                         VecView<const int64_t> sorted) {
+  int partitionSize = BTREE_LUT[level - 1];
+  int low = 0;
+  int high = partitionSize;
+  for (int i = 0; i < BTREE_WAYS; ++i) {
+    if (level > 1)
+      btree_construct_rec(
+          level - 1, dest.view(BTREE_WAYS + i * partitionSize),
+          sorted.view(low, std::min(high, sorted.size()) - low));
+    if (high >= sorted.size()) {
+      dest[i] = std::numeric_limits<int64_t>::max();
+      return;
+    }
+    dest[i] = sorted[high];
+    low = high + 1;
+    high += partitionSize + 1;
+  }
+}
+
+std::pair<Vec<int64_t>, int> btree_construct(VecView<const int64_t> sorted) {
+  int levels = 1;
+  while (BTREE_LUT[levels] < sorted.size()) {
+    levels += 1;
+  }
+  // we just overapproximate the size needed
+  Vec<int64_t> result(sorted.size() + BTREE_WAYS * levels);
+  btree_construct_rec(levels, result, sorted);
+  return std::make_pair(result, levels);
+}
+
+// this returns the index in the original sorted array
+inline int btree_search(int64_t key, VecView<const int64_t> tree, int levels) {
+  int low = 0;
+  const int64_t *treeptr = tree.cbegin();
+  int offset = 0;
+  while (1) {
+    int i = 0;
+#pragma GCC unroll 4
+    for (; i < BTREE_WAYS; ++i) {
+      if (key <= treeptr[i + offset]) break;
+      low += BTREE_LUT[levels - 1] + 1;
+    }
+    if (i >= BTREE_WAYS) return -1;
+    if (key == treeptr[i + offset]) return low + BTREE_LUT[levels - 1];
+    if (levels-- == 1) return -1;
+    offset += BTREE_WAYS + i * BTREE_LUT[levels];
+  }
+}
+
 // These two functions (Interpolate and Intersect) are the only places where
 // floating-point operations take place in the whole Boolean function. These are
 // carefully designed to minimize rounding error and to eliminate it at edge
@@ -383,9 +448,11 @@ std::tuple<Vec<int>, Vec<float>> Shadow02(const Manifold::Impl &inP,
 
 struct Kernel12 {
   VecView<const int64_t> p0q2;
+  int p0q2vsize;
   VecView<const int> s02;
   VecView<const float> z02;
   VecView<const int64_t> p1q1;
+  int p1q1vsize;
   VecView<const int> s11;
   VecView<const glm::vec4> xyzz11;
   VecView<const Halfedge> halfedgesP;
@@ -414,7 +481,7 @@ struct Kernel12 {
     for (int vert : {edge.startVert, edge.endVert}) {
       const int64_t key = forward ? SparseIndices::EncodePQ(vert, q2)
                                   : SparseIndices::EncodePQ(q2, vert);
-      const int idx = monobound_quaternary_search(p0q2, key);
+      const int idx = btree_search(key, p0q2, p0q2vsize);
       if (idx != -1) {
         const int s = s02[idx];
         x12 += s * ((vert == edge.startVert) == forward ? 1 : -1);
@@ -435,7 +502,7 @@ struct Kernel12 {
       const int q1F = edge.IsForward() ? q1 : edge.pairedHalfedge;
       const int64_t key = forward ? SparseIndices::EncodePQ(p1, q1F)
                                   : SparseIndices::EncodePQ(q1F, p1);
-      const int idx = monobound_quaternary_search(p1q1, key);
+      const int idx = btree_search(key, p1q1, p1q1vsize);
       if (idx != -1) {  // s is implicitly zero for anything not found
         const int s = s11[idx];
         x12 -= s * (edge.IsForward() ? 1 : -1);
@@ -479,11 +546,15 @@ std::tuple<Vec<int>, Vec<glm::vec3>> Intersect12(
   Vec<int> x12(p1q2.size());
   Vec<glm::vec3> v12(p1q2.size());
 
+  auto btree_p1q1 = btree_construct(p1q1.AsVec64());
+  auto btree_p0q2 = btree_construct(p0q2.AsVec64());
+
   for_each_n(
       autoPolicy(p1q2.size()), zip(countAt(0), x12.begin(), v12.begin()),
       p1q2.size(),
-      Kernel12({p0q2.AsVec64(), s02, z02, p1q1.AsVec64(), s11, xyzz11,
-                inP.halfedge_, inQ.halfedge_, inP.vertPos_, forward, p1q2}));
+      Kernel12({btree_p0q2.first, btree_p0q2.second, s02, z02, btree_p1q1.first,
+                btree_p1q1.second, s11, xyzz11, inP.halfedge_, inQ.halfedge_,
+                inP.vertPos_, forward, p1q2}));
 
   p1q2.KeepFinite(v12, x12);
 
