@@ -11,6 +11,7 @@ jobs:
     timeout-minutes: 60
     runs-on: ubuntu-22.04
     if: github.event.pull_request.draft == false
+    steps:
     - run: git config --global submodule.fetchJobs 8
     - name: clone openscad
       uses: actions/checkout@v3
