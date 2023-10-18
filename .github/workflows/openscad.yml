@@ -1,0 +1,40 @@
+name: OpenSCAD CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+    timeout-minutes: 60
+    runs-on: ubuntu-22.04
+    if: github.event.pull_request.draft == false
+    - run: git config --global submodule.fetchJobs 8
+    - name: clone openscad
+      uses: actions/checkout@v3
+      with:
+        repository: pca006132/openscad
+        submodules: recursive
+    - name: setup
+      run: |
+        ./scripts/github-ci-linux-get-dependencies.sh kinetic
+        sudo apt-get install gettext ninja clang libtbb-dev
+        rm -rf submodules/manifold
+        git clone https://gist.github.com/dd4e50d46610daa3f6502c6ee75b8cb4.git $GITHUB_WORKSPACE/openscad-test
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+        path: submodules/manifold
+    - name: build
+      run: |
+        mkdir build && cd build
+        # clang seems to be faster and uses less memory
+        cmake -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DUSE_BUILTIN_OPENCSG=ON -DEXPERIMENTAL=ON -DMANIFOLD_DEBUG=ON -DCMAKE_UNITY_BUILD=ON -GNinja ..
+        ninja
+    - name: test
+      run: |
+        cd $GITHUB_WORKSPACE/openscad-test
+        OPENSCAD=../build/openscad ./test *.scad
+
