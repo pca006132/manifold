@@ -21,7 +21,7 @@ jobs:
     - name: setup
       run: |
         ./scripts/github-ci-linux-get-dependencies.sh kinetic
-        sudo apt-get install gettext ninja clang libtbb-dev
+        sudo apt-get install gettext ninja-build clang libtbb-dev
         rm -rf submodules/manifold
         git clone https://gist.github.com/dd4e50d46610daa3f6502c6ee75b8cb4.git $GITHUB_WORKSPACE/openscad-test
     - uses: actions/checkout@v3
