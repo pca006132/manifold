@@ -155,7 +155,7 @@ jobs:
       shell: bash
       run: |
         cd build/test
-        ./Release/manifold_test.exe
+        ./Debug/manifold_test.exe
 
   build_mxe:
     timeout-minutes: 30
