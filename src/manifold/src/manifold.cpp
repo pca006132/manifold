@@ -237,9 +237,8 @@ Mesh Manifold::GetMesh() const {
                                 impl.halfedgeTangent_.end());
 
   result.triVerts.resize(NumTri());
-  // note that `triVerts` is `std::vector`, so we cannot use thrust::device
-  thrust::for_each_n(thrust::host, zip(result.triVerts.begin(), countAt(0)),
-                     NumTri(), MakeTri({impl.halfedge_}));
+  for_each_n(autoPolicy(NumTri()), zip(result.triVerts.begin(), countAt(0)),
+             NumTri(), MakeTri({impl.halfedge_}));
 
   return result;
 }
@@ -687,12 +686,11 @@ Manifold Manifold::SetProperties(
     } else {
       pImpl->meshRelation_.properties = Vec<float>(numProp * NumPropVert(), 0);
     }
-    thrust::for_each_n(
-        thrust::host, countAt(0), NumTri(),
-        UpdateProperties({pImpl->meshRelation_.properties.data(), numProp,
-                          oldProperties.data(), oldNumProp,
-                          pImpl->vertPos_.data(), triProperties.data(),
-                          pImpl->halfedge_.data(), propFunc}));
+    for_each_n(autoPolicy(NumTri()), countAt(0), NumTri(),
+               UpdateProperties({pImpl->meshRelation_.properties.data(),
+                                 numProp, oldProperties.data(), oldNumProp,
+                                 pImpl->vertPos_.data(), triProperties.data(),
+                                 pImpl->halfedge_.data(), propFunc}));
   }
 
   pImpl->meshRelation_.numProp = numProp;
@@ -942,11 +940,11 @@ std::vector<Manifold> Manifold::BatchHull(
   std::vector<Manifold> output;
   output.reserve(manifolds.size());
   output.resize(manifolds.size());
-  thrust::for_each_n(
-      thrust::host, zip(manifolds.begin(), output.begin()), manifolds.size(),
-      [](thrust::tuple<std::vector<Manifold>, Manifold&> inOut) {
-        thrust::get<1>(inOut) = Manifold::Hull(thrust::get<0>(inOut));
-      });
+  for_each_n(ExecutionPolicy::Par, zip(manifolds.begin(), output.begin()),
+             manifolds.size(),
+             [](thrust::tuple<std::vector<Manifold>, Manifold&> inOut) {
+               thrust::get<1>(inOut) = Manifold::Hull(thrust::get<0>(inOut));
+             });
   return output;
 }
 
@@ -995,9 +993,9 @@ std::vector<Manifold> Manifold::Fracture(const std::vector<glm::dvec3>& pts,
   computeVoronoiCell.container = &container;
   computeVoronoiCell.original = this;
   computeVoronoiCell.output = &output;
-  thrust::for_each_n(
-      thrust::host, zip(countAt(0), cellIndices.begin(), cellPosWeight.begin()),
-      cellIndices.size(), computeVoronoiCell);
+  for_each_n(autoPolicy(cellIndices.size()),
+             zip(countAt(0), cellIndices.begin(), cellPosWeight.begin()),
+             cellIndices.size(), computeVoronoiCell);
   return output;
 }
 /*std::vector<Manifold> Manifold::Fracture(
@@ -1041,17 +1039,16 @@ std::vector<Manifold> Manifold::ConvexDecomposition() const {
   ZoneScoped;
 
   //// Simplify the input mesh until it cannot be simplified any further
-  //auto simpl = std::make_shared<Impl>(*GetCsgLeafNode().GetImpl());
-  //int oldEdgeCount = 0, edgeCount = simpl->halfedge_.size();
-  //bool modified = false;
-  //while (oldEdgeCount != edgeCount) {
-  //  // Instead, count the number of edges not marked for deletion
-  //  edgeCount = simpl->halfedge_.size();
-  //  std::cout << "[INFO] Running Topology Simplification Pass..." << std::endl;
-  //  simpl->SimplifyTopology();
-  //  simpl->Finish();
-  //  oldEdgeCount = edgeCount;
-  //}
+  // auto simpl = std::make_shared<Impl>(*GetCsgLeafNode().GetImpl());
+  // int oldEdgeCount = 0, edgeCount = simpl->halfedge_.size();
+  // bool modified = false;
+  // while (oldEdgeCount != edgeCount) {
+  //   // Instead, count the number of edges not marked for deletion
+  //   edgeCount = simpl->halfedge_.size();
+  //   std::cout << "[INFO] Running Topology Simplification Pass..." <<
+  //   std::endl; simpl->SimplifyTopology(); simpl->Finish(); oldEdgeCount =
+  //   edgeCount;
+  // }
 
   // Early-Exit if the manifold is already convex
   std::vector<int> uniqueFaces = ReflexFaces();
@@ -1073,7 +1070,7 @@ std::vector<Manifold> Manifold::ConvexDecomposition() const {
         glm::dvec3(circumcircle.x, circumcircle.y, circumcircle.z);
     circumradii[i] = circumcircle.w;
 
-    // Debug Draw the Circumcenter and Triangle of Degenerate Triangles 
+    // Debug Draw the Circumcenter and Triangle of Degenerate Triangles
     // if (circumcircle.w < 0.0) {
     //   std::cout << "Circumradius: " << circumcircle.w << std::endl;
     //   debugShapes.push_back(Hull(
@@ -1162,46 +1159,13 @@ Manifold Manifold::Minkowski(const Manifold& a, const Manifold& b,
       composedHulls.push_back(Manifold::Hull(simpleHull));
       // Convex - Non-Convex Minkowski: Slower
     } else if (!aConvex && bConvex) {
-      // Speed Equivalent?
-      // for (glm::ivec3 vertexIndices : aMesh.triVerts) {
-      //  composedParts.push_back({bM.Translate(aMesh.vertPos[vertexIndices.x]),
-      //                           bM.Translate(aMesh.vertPos[vertexIndices.y]),
-      //                           bM.Translate(aMesh.vertPos[vertexIndices.z])});
-      //}
       composedHulls.resize(aMesh.triVerts.size() + 1);
-      thrust::for_each_n(
-          thrust::host, zip(countAt(1), aMesh.triVerts.begin()),
-          aMesh.triVerts.size(),
-          ComputeTriangleHull({&bM, &aMesh.vertPos, &composedHulls}));
+      for_each_n(autoPolicy(aMesh.triVerts.size()),
+                 zip(countAt(1), aMesh.triVerts.begin()), aMesh.triVerts.size(),
+                 ComputeTriangleHull({&bM, &aMesh.vertPos, &composedHulls}));
       // Non-Convex - Non-Convex Minkowski: Very Slow
     } else if (!aConvex && !bConvex) {
       manifold::Mesh bMesh = bM.GetMesh();
-
-      // Speed Equivalent?
-      // for (glm::ivec3 aVertexIndices : aMesh.triVerts) {
-      //  for (glm::ivec3 bVertexIndices : bMesh.triVerts) {
-      //    composedHulls.push_back(Manifold::Hull(
-      //        {aMesh.vertPos[aVertexIndices.x] +
-      //        bMesh.vertPos[bVertexIndices.x],
-      //         aMesh.vertPos[aVertexIndices.x] +
-      //         bMesh.vertPos[bVertexIndices.y],
-      //         aMesh.vertPos[aVertexIndices.x] +
-      //         bMesh.vertPos[bVertexIndices.z],
-      //         aMesh.vertPos[aVertexIndices.y] +
-      //         bMesh.vertPos[bVertexIndices.x],
-      //         aMesh.vertPos[aVertexIndices.y] +
-      //         bMesh.vertPos[bVertexIndices.y],
-      //         aMesh.vertPos[aVertexIndices.y] +
-      //         bMesh.vertPos[bVertexIndices.z],
-      //         aMesh.vertPos[aVertexIndices.z] +
-      //         bMesh.vertPos[bVertexIndices.x],
-      //         aMesh.vertPos[aVertexIndices.z] +
-      //         bMesh.vertPos[bVertexIndices.y],
-      //         aMesh.vertPos[aVertexIndices.z] +
-      //         bMesh.vertPos[bVertexIndices.z]}));
-      //  }
-      //}
-
       std::vector<std::pair<glm::ivec3, glm::ivec3>> trianglePairs;
       for (glm::ivec3 aVertexIndices : aMesh.triVerts) {
         for (glm::ivec3 bVertexIndices : bMesh.triVerts) {
@@ -1209,10 +1173,10 @@ Manifold Manifold::Minkowski(const Manifold& a, const Manifold& b,
         }
       }
       composedHulls.resize(trianglePairs.size() + 1);
-      thrust::for_each_n(thrust::host, zip(countAt(1), trianglePairs.begin()),
-                         trianglePairs.size(),
-                         ComputeTriangleTriangleHull(
-                             {&aMesh.vertPos, &bMesh.vertPos, &composedHulls}));
+      for_each_n(autoPolicy(trianglePairs.size()),
+                 zip(countAt(1), trianglePairs.begin()), trianglePairs.size(),
+                 ComputeTriangleTriangleHull(
+                     {&aMesh.vertPos, &bMesh.vertPos, &composedHulls}));
     }
   }
   auto newHulls = Manifold::BatchHull(composedParts);
