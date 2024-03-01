@@ -15,12 +15,15 @@
 #include <algorithm>
 #include <map>
 #include <numeric>
+#include <random>
+#include <unordered_set>
 
 #include "QuickHull.hpp"
 #include "boolean3.h"
 #include "csg_tree.h"
 #include "impl.h"
 #include "par.h"
+#include "voro++.hh"
 
 namespace {
 using namespace manifold;
@@ -58,6 +61,71 @@ struct UpdateProperties {
       propFunc(properties + numProp * propVert, vertPos[vert],
                oldProperties + numOldProp * propVert);
     }
+  }
+};
+
+struct ComputeVoronoiCell {
+  voro::container_poly* container;
+  const Manifold* original;
+  std::vector<Manifold>* output;
+  void operator()(thrust::tuple<int, glm::ivec3&, glm::dvec4&> inOut) {
+    const int idx = thrust::get<0>(inOut);
+    glm::ivec3& cell_idx = thrust::get<1>(inOut);
+    glm::dvec4& cell_pos = thrust::get<2>(inOut);
+    voro::voronoicell_neighbor c(*container);
+
+    if (container->compute_cell(c, cell_idx.y, cell_idx.z)) {
+      std::vector<glm::vec3> verts;
+      verts.reserve(c.p);
+      for (size_t i = 0; i < c.p; i++) {
+        verts.push_back(glm::vec3(cell_pos.x + 0.5 * c.pts[(4 * i) + 0],
+                                  cell_pos.y + 0.5 * c.pts[(4 * i) + 1],
+                                  cell_pos.z + 0.5 * c.pts[(4 * i) + 2]));
+      }
+
+      // c.neighbors - Check neighbors for Mergeability...
+
+      (*output)[cell_idx.x] = Manifold::Hull(verts) ^ *original;
+      verts.clear();
+    } else {
+      std::cout << "[ERROR] Degenerate Voronoi Cell at Index: " << cell_idx.x
+                << std::endl;
+    }
+  }
+};
+
+struct ComputeTriangleHull {
+  const Manifold* bM;
+  std::vector<glm::vec3>* vertPos;
+  std::vector<Manifold>* output;
+  void operator()(thrust::tuple<int, glm::ivec3&> inOut) {
+    const int idx = thrust::get<0>(inOut);
+    glm::ivec3& tri = thrust::get<1>(inOut);
+    (*output)[idx] = Manifold::Hull({(*bM).Translate((*vertPos)[tri.x]),
+                                     (*bM).Translate((*vertPos)[tri.y]),
+                                     (*bM).Translate((*vertPos)[tri.z])});
+  }
+};
+
+struct ComputeTriangleTriangleHull {
+  std::vector<glm::vec3>* vertPosAPtr;
+  std::vector<glm::vec3>* vertPosBPtr;
+  std::vector<Manifold>* output;
+  void operator()(thrust::tuple<int, std::pair<glm::ivec3, glm::ivec3>> inOut) {
+    const int idx = thrust::get<0>(inOut);
+    std::pair<glm::ivec3, glm::ivec3> tris = thrust::get<1>(inOut);
+    auto vertPosA = *vertPosAPtr;
+    auto vertPosB = *vertPosBPtr;
+    (*output)[idx] =
+        Manifold::Hull({vertPosA[tris.first.x] + vertPosB[tris.second.x],
+                        vertPosA[tris.first.x] + vertPosB[tris.second.y],
+                        vertPosA[tris.first.x] + vertPosB[tris.second.z],
+                        vertPosA[tris.first.y] + vertPosB[tris.second.x],
+                        vertPosA[tris.first.y] + vertPosB[tris.second.y],
+                        vertPosA[tris.first.y] + vertPosB[tris.second.z],
+                        vertPosA[tris.first.z] + vertPosB[tris.second.x],
+                        vertPosA[tris.first.z] + vertPosB[tris.second.y],
+                        vertPosA[tris.first.z] + vertPosB[tris.second.z]});
   }
 };
 
@@ -861,5 +929,294 @@ Manifold Manifold::Hull() const { return Hull(GetMesh().vertPos); }
  */
 Manifold Manifold::Hull(const std::vector<Manifold>& manifolds) {
   return Compose(manifolds).Hull();
+}
+
+/**
+ * Compute the convex hulls enveloping many sets of manifolds.
+ *
+ * @param manifolds A vector of vectors of manifolds over which compute hulls.
+ */
+std::vector<Manifold> Manifold::BatchHull(
+    const std::vector<std::vector<Manifold>>& manifolds) {
+  ZoneScoped;
+  std::vector<Manifold> output;
+  output.reserve(manifolds.size());
+  output.resize(manifolds.size());
+  thrust::for_each_n(
+      thrust::host, zip(manifolds.begin(), output.begin()), manifolds.size(),
+      [](thrust::tuple<std::vector<Manifold>, Manifold&> inOut) {
+        thrust::get<1>(inOut) = Manifold::Hull(thrust::get<0>(inOut));
+      });
+  return output;
+}
+
+/**
+ * Compute the voronoi fracturing of this Manifold into convex chunks.
+ *
+ * @param pts A vector of points over which to fracture the manifold.
+ * @param wts A vector of weights controlling the relative size of each chunk.
+ */
+std::vector<Manifold> Manifold::Fracture(const std::vector<glm::dvec3>& pts,
+                                         const std::vector<double>& wts) const {
+  ZoneScoped;
+  std::vector<Manifold> output;
+  output.reserve(pts.size());
+  output.resize(pts.size());
+
+  Box bounds = BoundingBox();
+  glm::vec3 min = bounds.min - 0.1f;
+  glm::vec3 max = bounds.max + 0.1f;
+  double V = (max.x - min.x) * (max.y - min.y) * (max.z - min.z);
+  double Nthird = powf((double)pts.size() / V, 1.0f / 3.0f);
+  voro::container_poly container(min.x, max.x, min.y, max.y, min.z, max.z,
+                                 std::round(Nthird * (max.x - min.x)),
+                                 std::round(Nthird * (max.y - min.y)),
+                                 std::round(Nthird * (max.z - min.z)),  //
+                                 false, false, false, pts.size());
+
+  bool hasWeights = wts.size() == pts.size();
+  for (size_t i = 0; i < pts.size(); i++) {
+    container.put(i, pts[i].x, pts[i].y, pts[i].z, hasWeights ? wts[i] : 1.0f);
+  }
+
+  // Prepare Parallel Voronoi Computation
+  std::vector<glm::ivec3> cellIndices;
+  std::vector<glm::dvec4> cellPosWeight;
+  voro::c_loop_all vl(container);
+  if (vl.start()) do {
+      int id;
+      double x, y, z, r;
+      vl.pos(id, x, y, z, r);
+      cellIndices.push_back({id, vl.ijk, vl.q});
+      cellPosWeight.push_back({x, y, z, r});
+    } while (vl.inc());
+
+  ComputeVoronoiCell computeVoronoiCell;
+  computeVoronoiCell.container = &container;
+  computeVoronoiCell.original = this;
+  computeVoronoiCell.output = &output;
+  thrust::for_each_n(
+      thrust::host, zip(countAt(0), cellIndices.begin(), cellPosWeight.begin()),
+      cellIndices.size(), computeVoronoiCell);
+  return output;
+}
+/*std::vector<Manifold> Manifold::Fracture(
+    const std::vector<glm::vec3>& pts,
+    const std::vector<float>& weights) const {
+  std::vector<glm::dvec3> highpVerts(pts.size());
+  std::vector<double> highpWeights(weights.size());
+  for (size_t i = 0; i < pts.size(); i++) {
+    highpVerts[i] = pts[i];
+    highpWeights[i] = weights[i];
+  }
+  return Fracture(highpVerts, highpWeights);
+}*/
+
+std::vector<int> Manifold::ReflexFaces(double tolerance) const {
+  std::unordered_set<int> uniqueReflexFaceSet;
+  const Impl& impl = *GetCsgLeafNode().GetImpl();
+  for (size_t i = 0; i < impl.halfedge_.size(); i++) {
+    Halfedge halfedge = impl.halfedge_[i];
+    int faceA = halfedge.face;
+    int faceB = impl.halfedge_[halfedge.pairedHalfedge].face;
+    glm::dvec3 tangent =
+        glm::cross((glm::dvec3)impl.faceNormal_[faceA],
+                   (glm::dvec3)impl.vertPos_[impl.halfedge_[i].endVert] -
+                       (glm::dvec3)impl.vertPos_[impl.halfedge_[i].startVert]);
+    double tangentProjection =
+        glm::dot((glm::dvec3)impl.faceNormal_[faceB], tangent);
+    //  If we've found a pair of reflex triangles, add them to the set
+    if (tangentProjection > tolerance) {
+      uniqueReflexFaceSet.insert(faceA);
+      uniqueReflexFaceSet.insert(faceB);
+    }
+  }
+  std::vector<int> uniqueFaces;  // Copy to a vector for indexed access
+  uniqueFaces.insert(uniqueFaces.end(), uniqueReflexFaceSet.begin(),
+                     uniqueReflexFaceSet.end());
+  return uniqueFaces;
+}
+
+std::vector<Manifold> Manifold::ConvexDecomposition() const {
+  ZoneScoped;
+
+  //// Simplify the input mesh until it cannot be simplified any further
+  //auto simpl = std::make_shared<Impl>(*GetCsgLeafNode().GetImpl());
+  //int oldEdgeCount = 0, edgeCount = simpl->halfedge_.size();
+  //bool modified = false;
+  //while (oldEdgeCount != edgeCount) {
+  //  // Instead, count the number of edges not marked for deletion
+  //  edgeCount = simpl->halfedge_.size();
+  //  std::cout << "[INFO] Running Topology Simplification Pass..." << std::endl;
+  //  simpl->SimplifyTopology();
+  //  simpl->Finish();
+  //  oldEdgeCount = edgeCount;
+  //}
+
+  // Early-Exit if the manifold is already convex
+  std::vector<int> uniqueFaces = ReflexFaces();
+  if (uniqueFaces.size() == 0) {
+    return std::vector<Manifold>(1, *this);
+  }
+
+  const Impl& impl = *GetCsgLeafNode().GetImpl();
+  std::vector<glm::dvec3> circumcenters(uniqueFaces.size());
+  std::vector<double> circumradii(uniqueFaces.size());
+  Vec<glm::dvec3> dVerts(impl.vertPos_.size());
+  for (size_t i = 0; i < impl.vertPos_.size(); i++) {
+    dVerts[i] = impl.vertPos_[i];
+  }
+  std::vector<Manifold> debugShapes;
+  for (size_t i = 0; i < uniqueFaces.size(); i++) {
+    glm::dvec4 circumcircle = impl.Circumcircle(dVerts, uniqueFaces[i]);
+    circumcenters[i] =
+        glm::dvec3(circumcircle.x, circumcircle.y, circumcircle.z);
+    circumradii[i] = circumcircle.w;
+
+    // Debug Draw the Circumcenter and Triangle of Degenerate Triangles 
+    // if (circumcircle.w < 0.0) {
+    //   std::cout << "Circumradius: " << circumcircle.w << std::endl;
+    //   debugShapes.push_back(Hull(
+    //       {Manifold::Sphere(circumcircle.w * 0.1, 10)
+    //            .Translate(glm::vec3(
+    //                dVerts[impl.halfedge_[(uniqueFaces[i] * 3) +
+    //                0].startVert])),
+    //        Manifold::Sphere(circumcircle.w * 0.1, 10)
+    //            .Translate(glm::vec3(
+    //                dVerts[impl.halfedge_[(uniqueFaces[i] * 3) +
+    //                1].startVert])),
+    //        Manifold::Sphere(circumcircle.w * 0.1, 10)
+    //            .Translate(glm::vec3(
+    //                dVerts[impl.halfedge_[(uniqueFaces[i] * 3) +
+    //                2].startVert]))
+    //     }));
+    //
+    //   debugShapes.push_back(Manifold::Sphere(circumcircle.w * 0.2, 10)
+    //                             .Translate(glm::vec3(circumcenters[i])));
+    // }
+  }
+
+  for (size_t i = 0; i < circumcenters.size() - 1; i++) {
+    for (size_t j = circumcenters.size() - 1; j > i; j--) {
+      if (glm::distance(circumcenters[i], circumcenters[j]) < 1e-9 ||
+          circumradii[j] < 0.0) {
+        std::vector<glm::dvec3>::iterator it = circumcenters.begin();
+        std::advance(it, j);
+        circumcenters.erase(it);
+        std::vector<double>::iterator it2 = circumradii.begin();
+        std::advance(it2, j);
+        circumradii.erase(it2);
+      }
+    }
+  }
+
+  std::vector<Manifold> output = Fracture(circumcenters, circumradii);
+  output.insert(output.end(), debugShapes.begin(), debugShapes.end());
+  return output;
+}
+
+/**
+ * Compute the minkowski sum of two manifolds.
+ *
+ * @param a The first manifold in the sum.
+ * @param b The second manifold in the sum.
+ */
+Manifold Manifold::Minkowski(const Manifold& a, const Manifold& b,
+                             bool useNaive) {
+  std::vector<std::vector<Manifold>> composedParts;
+  std::vector<Manifold> composedHulls({a});
+  if (!useNaive) {  // Use the general method
+    std::vector<Manifold> aDecomposition = a.ConvexDecomposition();
+    std::vector<Manifold> bDecomposition = b.ConvexDecomposition();
+    for (Manifold aPart : aDecomposition) {
+      manifold::Mesh aMesh = aPart.GetMesh();
+      for (Manifold bPart : bDecomposition) {
+        std::vector<Manifold> abComposition;
+        for (glm::vec3 vertexPosition : aMesh.vertPos) {
+          abComposition.push_back(bPart.Translate(vertexPosition));
+        }
+        composedParts.push_back(abComposition);
+      }
+    }
+  } else {  // Use the naive method
+    bool aConvex = a.ReflexFaces().size() == 0;
+    bool bConvex = b.ReflexFaces().size() == 0;
+
+    // If the convex manifold was supplied first, swap them!
+    Manifold aM = a, bM = b;
+    if (aConvex && !bConvex) {
+      aM = b;
+      bM = a;
+      aConvex = !aConvex;
+      bConvex = !bConvex;
+    }
+
+    manifold::Mesh aMesh = aM.GetMesh();
+
+    // Convex-Convex Minkowski: Very Fast
+    if (aConvex && bConvex) {
+      std::vector<Manifold> simpleHull;
+      for (glm::vec3 vertex : aMesh.vertPos) {
+        simpleHull.push_back({bM.Translate(vertex)});
+      }
+      composedHulls.push_back(Manifold::Hull(simpleHull));
+      // Convex - Non-Convex Minkowski: Slower
+    } else if (!aConvex && bConvex) {
+      // Speed Equivalent?
+      // for (glm::ivec3 vertexIndices : aMesh.triVerts) {
+      //  composedParts.push_back({bM.Translate(aMesh.vertPos[vertexIndices.x]),
+      //                           bM.Translate(aMesh.vertPos[vertexIndices.y]),
+      //                           bM.Translate(aMesh.vertPos[vertexIndices.z])});
+      //}
+      composedHulls.resize(aMesh.triVerts.size() + 1);
+      thrust::for_each_n(
+          thrust::host, zip(countAt(1), aMesh.triVerts.begin()),
+          aMesh.triVerts.size(),
+          ComputeTriangleHull({&bM, &aMesh.vertPos, &composedHulls}));
+      // Non-Convex - Non-Convex Minkowski: Very Slow
+    } else if (!aConvex && !bConvex) {
+      manifold::Mesh bMesh = bM.GetMesh();
+
+      // Speed Equivalent?
+      // for (glm::ivec3 aVertexIndices : aMesh.triVerts) {
+      //  for (glm::ivec3 bVertexIndices : bMesh.triVerts) {
+      //    composedHulls.push_back(Manifold::Hull(
+      //        {aMesh.vertPos[aVertexIndices.x] +
+      //        bMesh.vertPos[bVertexIndices.x],
+      //         aMesh.vertPos[aVertexIndices.x] +
+      //         bMesh.vertPos[bVertexIndices.y],
+      //         aMesh.vertPos[aVertexIndices.x] +
+      //         bMesh.vertPos[bVertexIndices.z],
+      //         aMesh.vertPos[aVertexIndices.y] +
+      //         bMesh.vertPos[bVertexIndices.x],
+      //         aMesh.vertPos[aVertexIndices.y] +
+      //         bMesh.vertPos[bVertexIndices.y],
+      //         aMesh.vertPos[aVertexIndices.y] +
+      //         bMesh.vertPos[bVertexIndices.z],
+      //         aMesh.vertPos[aVertexIndices.z] +
+      //         bMesh.vertPos[bVertexIndices.x],
+      //         aMesh.vertPos[aVertexIndices.z] +
+      //         bMesh.vertPos[bVertexIndices.y],
+      //         aMesh.vertPos[aVertexIndices.z] +
+      //         bMesh.vertPos[bVertexIndices.z]}));
+      //  }
+      //}
+
+      std::vector<std::pair<glm::ivec3, glm::ivec3>> trianglePairs;
+      for (glm::ivec3 aVertexIndices : aMesh.triVerts) {
+        for (glm::ivec3 bVertexIndices : bMesh.triVerts) {
+          trianglePairs.push_back({aVertexIndices, bVertexIndices});
+        }
+      }
+      composedHulls.resize(trianglePairs.size() + 1);
+      thrust::for_each_n(thrust::host, zip(countAt(1), trianglePairs.begin()),
+                         trianglePairs.size(),
+                         ComputeTriangleTriangleHull(
+                             {&aMesh.vertPos, &bMesh.vertPos, &composedHulls}));
+    }
+  }
+  auto newHulls = Manifold::BatchHull(composedParts);
+  composedHulls.insert(composedHulls.end(), newHulls.begin(), newHulls.end());
+  return Manifold::BatchBoolean(composedHulls, manifold::OpType::Add);
 }
 }  // namespace manifold

@@ -3,12 +3,12 @@
 name: CI
 
 # Controls when the action will run. Triggers the workflow on push or pull request
-# events but only for the master branch
+# events but only for the feat-voacd branch
 on:
   push:
-    branches: [ master ]
+    branches: [ feat-voacd ]
   pull_request:
-    branches: [ master ]
+    branches: [ feat-voacd ]
 
 jobs:
   build:

@@ -1,3 +1,84 @@
+# Manifold - VOCD Edition
+
+This fork of Manifold contains the VoCD (Voronoi Convex Decomposition) algorithm.
+
+VoCD is a novel exact convex decomposition algorithm that is faster and simpler than the alternatives in libraries like CGAL. It is based on the notion that triangles can be exactly segmented with a power diagram of each triangle's circumcenter and circumradius. Reflex Faces are added to the voronoi diagram to ensure that the convex voronoi cells will exactly cut along reflex edges, ensuring a constant decomposition of 2 * the number of reflex edges.
+
+Example Program:
+
+```python
+import manifold3d # <--- Using this branch - zalo/manifold@feat-voacd
+import random
+import trimesh
+import numpy as np
+from time import perf_counter
+
+rand_color = [random.random(), random.random(), random.random()]
+def explode(convex_pieces, explode_amount = 1.5, debug_shapes = None):
+    global rand_color
+    exploded_pieces = []
+    for i, convex_piece in enumerate(convex_pieces):
+        centroid = np.mean(convex_piece.to_mesh().vert_properties[:, :3], axis=0)
+        offset = centroid*explode_amount - centroid
+        exploded_piece = convex_piece.translate([offset[0], offset[1], offset[2]])
+        rand_color = [random.random(), random.random(), random.random()]
+        try:
+            exploded_piece  = exploded_piece .set_properties(3, lambda pos, oldProp: rand_color)
+            if debug_shapes is not None:
+                debug_shapes[i] = debug_shapes[i].set_properties(3, lambda pos, oldProp: rand_color)
+                exploded_pieces.append(debug_shapes[i])
+        except:
+            pass
+            #print("Failed to set properties")
+        exploded_pieces.append(exploded_piece)
+    return exploded_pieces
+
+def save_mesh(model, name, ext="glb"):
+    mesh = model.to_mesh()
+    if mesh.vert_properties.shape[1] > 3:
+        vertices =  mesh.vert_properties[:, :3]
+        colors   = (mesh.vert_properties[:, 3:] * 255).astype(np.uint8)
+    else:
+        vertices = mesh.vert_properties
+        colors   = None
+    meshOut = trimesh.Trimesh(vertices=vertices, faces=mesh.tri_verts,
+                              vertex_colors=colors)
+    trimesh.exchange.export.export_mesh(meshOut, name+'.'+ext, ext)
+    print('Exported model to ', name+'.'+ext)
+
+if __name__ == "__main__":
+    sphere = manifold3d.Manifold.sphere(0.6, 30)
+    cube   = manifold3d.Manifold.cube  ([1.0, 1.0, 1.0], True)
+
+    fun_shape = cube - sphere
+    save_mesh(fun_shape, "fun_shape")
+
+    t0 = perf_counter()
+    convex_parts     = fun_shape.convex_decomposition()
+    for convex_part in convex_parts:
+        convex_volume = convex_part.volume()
+    print("Orig Convex Decomposition took", (perf_counter()-t0)*1000, "ms creating", len(convex_parts), "pieces")
+
+    # Calculate volume of original mesh and union of convex hulls
+    original_volume = fun_shape.volume()
+    union           = manifold3d.Manifold()
+    valid_parts = 0
+    for convex_part in convex_parts:
+        convex_volume = convex_part.volume()
+        if convex_volume != 0.0:
+            valid_parts += 1
+            union += manifold3d.Manifold.hull(convex_part)
+    print("Valid Parts:", valid_parts)
+    union_volume = union.volume()
+    print("Original Volume:", original_volume, "Convex Volume:", union_volume, 
+          "Difference:", str(round(((union_volume - original_volume)/original_volume) * 100.0, 5))+"%")
+
+    exploded_convex_decomp = manifold3d.Manifold.compose(explode(convex_parts, 1.5))
+    save_mesh(exploded_convex_decomp, "exploded_convex_decomposition", "glb")
+```
+
+---
+
 [![codecov](https://codecov.io/github/elalish/manifold/branch/master/graph/badge.svg?token=IIA8G5HVS7)](https://codecov.io/github/elalish/manifold)
 [![PyPI version](https://badge.fury.io/py/manifold3d.svg)](https://badge.fury.io/py/manifold3d)
 [![npm version](https://badge.fury.io/js/manifold-3d.svg)](https://badge.fury.io/js/manifold-3d)

@@ -257,6 +257,26 @@ class Manifold {
   Manifold Hull() const;
   static Manifold Hull(const std::vector<Manifold>& manifolds);
   static Manifold Hull(const std::vector<glm::vec3>& pts);
+  static std::vector<Manifold> BatchHull(
+      const std::vector<std::vector<Manifold>>& manifolds);
+  ///@}
+
+  /** @name Voronoi Functions
+   */
+  ///@{
+  std::vector<Manifold> Fracture(const std::vector<glm::dvec3>& pts,
+                                 const std::vector<double>& weights) const;
+  //std::vector<Manifold> Fracture(const std::vector<glm::vec3>& pts,
+  //                               const std::vector<float>& weights) const;
+  std::vector<int> ReflexFaces(double tolerance = 1e-8) const;
+  std::vector<Manifold> ConvexDecomposition() const;
+  ///@}
+
+  /** @name Minkowski Functions
+   */
+  ///@{
+  static Manifold Minkowski(const Manifold& a, const Manifold& b,
+                            bool useNaive = false);
   ///@}
 
   /** @name Testing hooks

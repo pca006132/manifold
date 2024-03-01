@@ -792,3 +792,21 @@ TEST(Manifold, EmptyHull) {
       {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}};
   EXPECT_TRUE(Manifold::Hull(coplanar).IsEmpty());
 }
+
+TEST(Manifold, ConvexDecomposition) {
+  Manifold sphere = Manifold::Sphere(0.6, 20);
+  Manifold cube = Manifold::Cube({1.0, 1.0, 1.0}, true);
+  Manifold nonConvex = cube - sphere;
+  std::vector<Manifold> convexParts = nonConvex.ConvexDecomposition();
+
+  EXPECT_EQ(convexParts.size(), 219);
+
+  float originalVolume = nonConvex.GetProperties().volume;
+  float convex_volume = 0.0;
+  Manifold manifold_union = convexParts[0].AsOriginal();
+  for (Manifold cur_manifold : convexParts) {
+    manifold_union += cur_manifold.Hull();
+  }
+  float union_volume = manifold_union.GetProperties().volume;
+  EXPECT_NEAR(originalVolume, union_volume, 1e-6);
+}

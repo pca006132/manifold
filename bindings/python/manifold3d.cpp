@@ -40,6 +40,11 @@ struct glm_name<glm::vec3> {
   static constexpr char const multi_name[] = "FloatNx3";
 };
 template <>
+struct glm_name<glm::dvec3> {
+  static constexpr char const name[] = "Doublex3";
+  static constexpr char const multi_name[] = "DoubleNx3";
+};
+template <>
 struct glm_name<glm::vec2> {
   static constexpr char const name[] = "Floatx2";
   static constexpr char const multi_name[] = "FloatNx2";
@@ -252,6 +257,8 @@ NB_MODULE(manifold3d, m) {
           nb::arg("pts"), manifold__hull__pts)
       .def("transform", &Manifold::Transform, nb::arg("m"),
            manifold__transform__m)
+      .def_static("minkowski", &Manifold::Minkowski, nb::arg("a"), nb::arg("b"),
+                  nb::arg("useNaive"))
       .def("translate", &Manifold::Translate, nb::arg("t"),
            manifold__translate__v)
       .def("scale", &Manifold::Scale, nb::arg("v"), manifold__scale__v)
@@ -351,6 +358,28 @@ NB_MODULE(manifold3d, m) {
       .def("slice", &Manifold::Slice, nb::arg("height"),
            manifold__slice__height)
       .def("project", &Manifold::Project, manifold__project)
+      .def(
+          "fracture",
+          [](Manifold &self,
+             const nb::ndarray<nb::numpy, const double, nb::c_contig,
+                               nb::shape<nb::any, 3>> &pts,
+             const nb::ndarray<nb::numpy, const double, nb::c_contig,
+                               nb::shape<nb::any>> &weights) {
+            std::vector<glm::dvec3> pts_vec;
+            std::vector<double> weights_vec;
+            auto pointData = pts.data();
+            auto weightData = weights.data();
+            for (int i = 0; i < pts.shape(0) * pts.shape(1);
+                 i += pts.shape(1)) {
+              pts_vec.push_back(
+                  {pointData[i], pointData[i + 1], pointData[i + 2]});
+            }
+            for (int i = 0; i < weights.shape(0); i++) {
+              weights_vec.push_back(weightData[i]);
+            }
+            return self.Fracture(pts_vec, weights_vec);
+          }, nb::arg("pts"), nb::arg("weights"))
+      .def("convex_decomposition", &Manifold::ConvexDecomposition)
       .def("status", &Manifold::Status, manifold__status)
       .def(
           "bounding_box",

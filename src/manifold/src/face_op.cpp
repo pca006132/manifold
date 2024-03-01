@@ -318,4 +318,33 @@ CrossSection Manifold::Impl::Project() const {
 
   return CrossSection(polys).Simplify(precision_);
 }
+
+glm::dvec4 Manifold::Impl::Circumcircle(Vec<glm::dvec3> verts, int face) const {
+  glm::dvec3 va = verts[this->halfedge_[(face * 3) + 0].startVert];
+  glm::dvec3 vb = verts[this->halfedge_[(face * 3) + 1].startVert];
+  glm::dvec3 vc = verts[this->halfedge_[(face * 3) + 2].startVert];
+
+  glm::dvec3 a = va - vc;
+  glm::dvec3 b = vb - vc;
+  glm::dvec3 c = va - vb;
+  double a_length = glm::length(a);
+  double b_length = glm::length(b);
+  double c_length = glm::length(c);
+  glm::dvec3 numerator =
+      glm::cross((((a_length * a_length) * b) - ((b_length * b_length) * a)),
+                 glm::cross(a, b));
+  double crs = glm::length(glm::cross(a, b));
+  double denominator = 2.0 * (crs * crs);
+  glm::dvec3 circumcenter = (numerator / denominator) + vc;
+  double circumradius = glm::length(circumcenter - vc);
+
+  double max_length = std::fmax(a_length, std::fmax(b_length, c_length));
+  double min_length = std::fmin(a_length, std::fmin(b_length, c_length));
+  if (max_length / min_length > 15.0) {
+    circumradius *= -1.0; // Mark this triangle as degenerate
+  }
+
+  return glm::dvec4(circumcenter.x, circumcenter.y, circumcenter.z,
+                    circumradius);
+}
 }  // namespace manifold
